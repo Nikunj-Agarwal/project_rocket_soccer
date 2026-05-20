@@ -3,7 +3,7 @@ simulator.py — The "World" for the Robot Soccer Striker project.
 
 Handles:
   - Car state update via RK4 integration of the kinematic bicycle model.
-  - Ball state update via constant-velocity propagation.
+  - Ball state update via inelastic wall-bounce propagation.
   - Matplotlib-based 2-D rendering of the field, car, ball, and goal.
 
 No planning or optimisation logic lives here.
@@ -11,6 +11,11 @@ No planning or optimisation logic lives here.
 
 import numpy as np
 import matplotlib
+
+from src.ball_physics import (
+    DEFAULT_BALL_RESTITUTION,
+    propagate_ball_step,
+)
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.transforms import Affine2D
@@ -40,6 +45,7 @@ class World:
         dt: float = DEFAULT_DT,
         L: float = DEFAULT_WHEELBASE,
         field_size: tuple = (DEFAULT_FIELD_W, DEFAULT_FIELD_H),
+        ball_restitution: float = DEFAULT_BALL_RESTITUTION,
     ):
         """
         Parameters
@@ -51,6 +57,7 @@ class World:
         dt        : simulation time-step (s)
         L         : wheelbase (m)
         field_size: (width, height) of the pitch (m)
+        ball_restitution: coefficient of restitution for wall bounces (0-1)
         """
         self.car_state = np.array(car_state, dtype=float)
         self.ball_pos = np.array(ball_pos, dtype=float)
@@ -59,6 +66,7 @@ class World:
         self.dt = dt
         self.L = L
         self.field_size = field_size
+        self.ball_restitution = ball_restitution
 
         # For rendering
         self._fig = None
@@ -132,8 +140,16 @@ class World:
             np.sin(self.car_state[2]), np.cos(self.car_state[2])
         )
 
-        # 2. Update ball (constant velocity)
-        self.ball_pos = self.ball_pos + self.ball_vel * self.dt
+        # 2. Update ball (inelastic wall bounce)
+        W, H = self.field_size
+        self.ball_pos, self.ball_vel = propagate_ball_step(
+            self.ball_pos,
+            self.ball_vel,
+            self.dt,
+            field_w=W,
+            field_h=H,
+            restitution=self.ball_restitution,
+        )
 
     # ------------------------------------------------------------------
     # Rendering

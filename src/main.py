@@ -20,6 +20,13 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.ball_physics import (
+    DEFAULT_BALL_DT,
+    DEFAULT_BALL_RESTITUTION,
+    DEFAULT_FIELD_H,
+    DEFAULT_FIELD_W,
+    propagate_ball_for_time,
+)
 from src.simulator import World
 from src.nmpc_solver import InterceptionMPC
 from src.network import StrikeNet
@@ -34,6 +41,9 @@ def run_simulation(
     save_frames: bool = True,
     save_dir: str = None,
     v_impact: float = 1.0,
+    field_size: tuple = (DEFAULT_FIELD_W, DEFAULT_FIELD_H),
+    ball_restitution: float = DEFAULT_BALL_RESTITUTION,
+    dt: float = DEFAULT_BALL_DT,
 ):
     """
     Runs the closed-loop shrinking-horizon NMPC simulation.
@@ -65,7 +75,6 @@ def run_simulation(
     theta_strike = float(preds[3])
 
     # Convert T_strike to discrete steps
-    dt = 0.1
     N_steps = int(round(T_strike / dt))
     N_steps = max(1, min(50, N_steps)) # Clip between 0.1s and 5.0s
 
@@ -79,13 +88,23 @@ def run_simulation(
     print("-" * 65)
 
     # Define strike state for NMPC
-    # Compute exact ball position at the final simulation step (T_final = N_steps * dt)
-    # to eliminate neural network regression and time discretization errors.
+    # Bounce-aware ball position at T_final (matches World.step physics)
     T_final = N_steps * dt
-    x_strike_exact = ball_start[0] + ball_vel[0] * T_final
-    y_strike_exact = ball_start[1] + ball_vel[1] * T_final
+    field_w, field_h = field_size
+    strike_pos, _ = propagate_ball_for_time(
+        ball_start,
+        ball_vel,
+        T_final,
+        dt=dt,
+        field_w=field_w,
+        field_h=field_h,
+        restitution=ball_restitution,
+    )
+    x_strike_exact = float(strike_pos[0])
+    y_strike_exact = float(strike_pos[1])
     theta_strike_exact = np.arctan2(goal_pos[1] - y_strike_exact, goal_pos[0] - x_strike_exact)
-    
+
+    print(f"  Ball bounce           : restitution={ball_restitution}, field={field_w}x{field_h} m")
     print(f"  Exact strike target   : x={x_strike_exact:.3f} m, y={y_strike_exact:.3f} m, theta={theta_strike_exact:+.3f} rad")
     print("-" * 65)
     
@@ -101,6 +120,8 @@ def run_simulation(
         ball_vel=ball_vel.copy(),
         goal_pos=goal_pos.copy(),
         dt=dt,
+        field_size=field_size,
+        ball_restitution=ball_restitution,
     )
     Q_term = np.diag([500.0, 500.0, 100.0, 1.0])
     R_weights = np.diag([0.01, 0.01])

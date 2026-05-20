@@ -1,17 +1,34 @@
 """
-data_generator.py — Phase 2
+data_generator.py — Phase 2 / 3.6
 
 Generates geometric ground-truth training examples using brute-force reachability checks.
-Saves to data/strike_dataset.npy as a structured array or standard NumPy array.
+Ball future positions use the same inelastic wall-bounce model as the simulator.
 """
 
 import os
 import argparse
 import numpy as np
 
-def generate_data(num_samples: int, output_path: str):
-    print(f"Generating {num_samples} samples using brute-force reachability...")
-    
+from src.ball_physics import (
+    DEFAULT_BALL_DT,
+    DEFAULT_BALL_RESTITUTION,
+    DEFAULT_FIELD_H,
+    DEFAULT_FIELD_W,
+    propagate_ball_step,
+)
+
+
+def generate_data(
+    num_samples: int,
+    output_path: str,
+    field_w: float = DEFAULT_FIELD_W,
+    field_h: float = DEFAULT_FIELD_H,
+    ball_dt: float = DEFAULT_BALL_DT,
+    ball_restitution: float = DEFAULT_BALL_RESTITUTION,
+):
+    print(f"Generating {num_samples} samples using brute-force reachability (bounce-aware)...")
+    print(f"  Field: {field_w}x{field_h} m | restitution={ball_restitution} | ball_dt={ball_dt}")
+
     # Constants
     v_max = 2.0  # From Phase 1 simulator plan
     goal_x, goal_y = 9.5, 3.0
@@ -38,15 +55,30 @@ def generate_data(num_samples: int, output_path: str):
         
         # Sweep future time T from 0.5 to 5.0 s
         T_feasible = None
+        ball_pos = np.array([b_x, b_y], dtype=float)
+        ball_vel_arr = np.array([b_vx, b_vy], dtype=float)
+        t_current = 0.0
+
         for T in np.arange(0.5, 5.05, 0.05):
-            # Ball future position
-            b_T_x = b_x + b_vx * T
-            b_T_y = b_y + b_vy * T
-            
-            # Check if ball is out of bounds (allowing a 10.0m margin for out-of-bounds interceptions)
-            if b_T_x < -10.0 or b_T_x > 20.0 or b_T_y < -10.0 or b_T_y > 16.0:
-                continue # Try next T, though it will likely just get further out.
-                
+            # Incremental bounce integration (same model as simulator, faster than restart each T)
+            while t_current < T - 1e-12:
+                step_dt = min(ball_dt, T - t_current)
+                ball_pos, ball_vel_arr = propagate_ball_step(
+                    ball_pos,
+                    ball_vel_arr,
+                    step_dt,
+                    field_w=field_w,
+                    field_h=field_h,
+                    restitution=ball_restitution,
+                )
+                t_current += step_dt
+
+            b_T_x, b_T_y = float(ball_pos[0]), float(ball_pos[1])
+
+            # Strike must remain on the playable field
+            if not (0.0 <= b_T_x <= field_w and 0.0 <= b_T_y <= field_h):
+                continue
+
             # Straight-line distance
             d = np.sqrt((b_T_x - c_x)**2 + (b_T_y - c_y)**2)
             

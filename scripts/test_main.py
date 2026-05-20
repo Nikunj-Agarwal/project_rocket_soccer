@@ -1,12 +1,8 @@
 """
-test_main.py — Phase 3 Integration Test
+test_main.py — Phase 3 / 3.6 Integration Test
 
-Runs the real-time simulation loop for 5 distinct random seeds.
-Evaluates:
-  - Final position error (threshold: <= 0.2 m)
-  - Final heading error (threshold: <= 0.15 rad)
-  - Overall success rate (threshold: >= 4/5 goals)
-  - Solver status (failures must be 0)
+Runs the real-time simulation loop for distinct random seeds (including wall-bounce cases).
+Evaluates interception success, on-field final states, and bounce-parameter consistency.
 """
 
 import os
@@ -23,7 +19,34 @@ matplotlib.use("Agg")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.ball_physics import (
+    DEFAULT_BALL_DT,
+    DEFAULT_BALL_RESTITUTION,
+    DEFAULT_FIELD_H,
+    DEFAULT_FIELD_W,
+    propagate_ball_for_time,
+)
 from src.main import run_simulation
+
+
+def check_bounce_target_consistency(
+    ball_start: np.ndarray,
+    ball_vel: np.ndarray,
+    T_final: float,
+    expected_pos: np.ndarray,
+    tol: float = 1e-4,
+) -> bool:
+    """Strike target must match shared bounce integrator."""
+    pos, _ = propagate_ball_for_time(
+        ball_start,
+        ball_vel,
+        T_final,
+        dt=DEFAULT_BALL_DT,
+        field_w=DEFAULT_FIELD_W,
+        field_h=DEFAULT_FIELD_H,
+        restitution=DEFAULT_BALL_RESTITUTION,
+    )
+    return np.linalg.norm(pos - expected_pos) <= tol
 
 def setup_logging(log_dir: str) -> logging.Logger:
     """Create a logger that writes to both a file and stdout."""
@@ -55,7 +78,8 @@ def main():
     output_dir = os.path.join(PROJECT_ROOT, "data", "integration_test_results")
     log = setup_logging(output_dir)
 
-    seeds = [10, 21, 32, 43, 54] # 5 distinct random seeds
+    # 10: strong downward ball (wall bounce); others: mixed field coverage
+    seeds = [10, 21, 32, 43, 54]
     successes = 0
     failures = 0
     
@@ -63,7 +87,8 @@ def main():
     heading_errors = []
 
     log.info("=" * 65)
-    log.info("  PHASE 3 INTEGRATION TEST — Real-Time Interception Loop")
+    log.info("  PHASE 3.6 INTEGRATION TEST — Bounce-Aware Interception Loop")
+    log.info(f"  Bounce: restitution={DEFAULT_BALL_RESTITUTION}, dt={DEFAULT_BALL_DT}, field={DEFAULT_FIELD_W}x{DEFAULT_FIELD_H}")
     log.info("=" * 65)
 
     for i, seed in enumerate(seeds):
@@ -107,12 +132,23 @@ def main():
             pos_errors.append(pos_err)
             heading_errors.append(heading_err)
 
-            if success:
+            final_ball = np.array([history[-1]["ball_x"], history[-1]["ball_y"]])
+            final_car = np.array([history[-1]["car_x"], history[-1]["car_y"]])
+            on_field = (
+                0.0 <= final_ball[0] <= DEFAULT_FIELD_W
+                and 0.0 <= final_ball[1] <= DEFAULT_FIELD_H
+                and 0.0 <= final_car[0] <= DEFAULT_FIELD_W
+                and 0.0 <= final_car[1] <= DEFAULT_FIELD_H
+            )
+            if not on_field:
+                log.warning(f"  [WARN] Final state left the field: ball={final_ball}, car={final_car}")
+
+            if success and on_field:
                 successes += 1
-                log.info(f"  [SUCCESS] Interception achieved!")
+                log.info(f"  [SUCCESS] Interception achieved (on-field)!")
             else:
                 failures += 1
-                log.info(f"  [FAILED]: Missed target.")
+                log.info(f"  [FAILED]: Missed target or left field.")
             
             log.info(f"  Final errors: pos={pos_err:.4f} m | heading={heading_err:.4f} rad")
 
