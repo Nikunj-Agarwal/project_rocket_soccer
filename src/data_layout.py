@@ -26,6 +26,8 @@ MANUAL_RUNS_DIR = RUNS_DIR / "manual"
 STRIKE_DATASET = DATASET_DIR / "strike_dataset.npy"
 TRAINING_LOG = TRAINING_DIR / "training_log.csv"
 PLOTS_DIR = REPORTS_DIR / "plots"
+PLOTS_GLOBAL_DIR = PLOTS_DIR / "global"
+PLOTS_INTEGRATION_DIR = PLOTS_DIR / "integration"
 
 TRAJECTORY_CSV = "trajectory.csv"
 SIMULATION_MP4 = "simulation.mp4"
@@ -80,6 +82,21 @@ def list_integration_batches() -> list[Path]:
 def latest_integration_batch() -> Path | None:
     batches = list_integration_batches()
     return batches[0] if batches else None
+
+
+def plots_global_dir() -> Path:
+    """Report figures not tied to one integration batch."""
+    return ensure_dir(PLOTS_GLOBAL_DIR)
+
+
+def plots_batch_dir(batch_id: str) -> Path:
+    """Report figures for one integration batch: plots/integration/{batch_id}/"""
+    return ensure_dir(PLOTS_INTEGRATION_DIR / batch_id)
+
+
+def plots_seed_dir(batch_plot_dir: Path, seed: int | str) -> Path:
+    """Per-seed plot folder: .../seed_{N}/"""
+    return ensure_dir(batch_plot_dir / f"seed_{seed}")
 
 
 def iter_integration_seed_runs(batch_dir: Path):

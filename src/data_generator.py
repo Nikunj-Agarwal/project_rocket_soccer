@@ -136,7 +136,7 @@ def generate_data(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_samples", type=int, default=50000)
+    parser.add_argument("--num_samples", type=int, default=100000)
     args = parser.parse_args()
     
     # Path relative to script location

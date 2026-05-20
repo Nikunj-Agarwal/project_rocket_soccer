@@ -46,14 +46,17 @@ class StrikeNet(nn.Module):
         Returns: numpy array of [T_strike, x_strike, y_strike, theta_strike]
         """
         self.eval()
+        device = self.input_mean.device
         with torch.no_grad():
             if isinstance(x, np.ndarray):
-                x = torch.tensor(x, dtype=torch.float32)
+                x = torch.tensor(x, dtype=torch.float32, device=device)
+            else:
+                x = x.to(device)
             if x.dim() == 1:
                 x = x.unsqueeze(0)
             
             # Forward pass
-            out = self.forward(x) # (N, 5)
+            out = self.forward(x)  # (N, 5)
             
             # Extract outputs
             T = out[:, 0].cpu().numpy()

@@ -6,6 +6,8 @@ training/*
 reports/**/*
 !reports/.gitkeep
 !reports/plots/.gitkeep
+!reports/plots/README.md
+!reports/plots/**/README.md
 tests/**/*
 !tests/.gitkeep
 !tests/integration/.gitkeep

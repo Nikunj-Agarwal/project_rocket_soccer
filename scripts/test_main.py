@@ -5,12 +5,12 @@ Runs the real-time simulation loop for distinct random seeds (including wall-bou
 Evaluates interception success, on-field final states, and bounce-parameter consistency.
 """
 
+import argparse
 import os
 import sys
 import numpy as np
 import torch
 import logging
-from datetime import datetime
 
 # Force non-interactive matplotlib backend BEFORE importing anything else
 import matplotlib
@@ -32,6 +32,9 @@ from src.data_layout import (
     integration_seed_run,
 )
 from src.main import run_simulation
+
+# Default batch: 10 seeds (includes 10 for wall-bounce case)
+DEFAULT_INTEGRATION_SEEDS = [10, 21, 32, 43, 54, 7, 14, 28, 35, 42]
 
 
 def check_bounce_target_consistency(
@@ -79,12 +82,21 @@ def setup_logging(batch_dir: str) -> logging.Logger:
     return logger
 
 def main():
+    parser = argparse.ArgumentParser(description="Integration test with per-seed videos")
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=DEFAULT_INTEGRATION_SEEDS,
+        help="Random seeds to run (default: 10 seeds including seed 10)",
+    )
+    args = parser.parse_args()
+    seeds = args.seeds
+
     batch_dir = new_integration_batch()
     log = setup_logging(str(batch_dir))
     log.info(f"Batch directory: {batch_dir}")
-
-    # 10: strong downward ball (wall bounce); others: mixed field coverage
-    seeds = [10, 21, 32, 43, 54]
+    log.info(f"Seeds: {seeds}")
     successes = 0
     failures = 0
     
@@ -177,12 +189,14 @@ def main():
     log.info(f"  Avg Heading Error: {np.mean(heading_errors):.4f} rad (target: <= 0.15)")
     log.info("-" * 65)
 
-    # Pass criteria: at least 4 out of 5 goals, average errors below thresholds
+    # Pass criteria: at least 80% success, average errors below thresholds
+    min_successes = max(1, int(np.ceil(0.8 * len(seeds))))
     passed = (
-        successes >= 4 
-        and np.mean(pos_errors) <= 0.2 
+        successes >= min_successes
+        and np.mean(pos_errors) <= 0.2
         and np.mean(heading_errors) <= 0.15
     )
+    log.info(f"  Pass threshold     : {min_successes} / {len(seeds)} successes (80%)")
 
     if passed:
         log.info("  [PASSED] INTEGRATION TEST PASSED!")

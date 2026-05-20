@@ -1,19 +1,25 @@
 """
 generate_plots.py — Phase 4
 
-Builds report figures from training logs, integration-test trajectories,
-and optional StrikeNet vs ground-truth comparisons.
+Builds report figures under data/reports/plots/ with clear batch/seed structure.
 
-Usage (striker env):
+Layout:
+  plots/global/                          — training curve, StrikeNet sanity (not batch-specific)
+  plots/integration/{batch_id}/          — batch summary + README
+  plots/integration/{batch_id}/seed_{N}/ — trajectory.png, errors.png (from that batch's run)
+
+Usage:
     python scripts/generate_plots.py
-    python scripts/generate_plots.py --batch 20260521_014736
+    python scripts/generate_plots.py --batch 20260521_022824
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -23,18 +29,23 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, PROJECT_ROOT)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ball_physics import DEFAULT_FIELD_H, DEFAULT_FIELD_W
 from src.data_layout import (
-    PLOTS_DIR,
+    BATCH_LOG,
+    INTEGRATION_TESTS_DIR,
+    RUN_METADATA,
     STRIKE_DATASET,
     TRAINING_LOG,
     TRAJECTORY_CSV,
     iter_integration_seed_runs,
     latest_integration_batch,
     list_integration_batches,
+    plots_batch_dir,
+    plots_global_dir,
+    plots_seed_dir,
 )
 
 GOAL_POS = (9.5, 3.0)
@@ -74,9 +85,9 @@ def plot_training_curves(training_log: Path, out_dir: Path) -> str:
     return str(path)
 
 
-def plot_trajectory(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
+def plot_trajectory(df: pd.DataFrame, seed: str, batch_id: str, out_dir: Path) -> str:
     fig, ax = plt.subplots(figsize=(10, 6))
-    _draw_field(ax, title=f"Interception Trajectory — Seed {seed}")
+    _draw_field(ax, title=f"Batch {batch_id} — Seed {seed}")
 
     ax.plot(df["car_x"], df["car_y"], color="#1565c0", lw=2, label="Car path")
     ax.plot(df["ball_x"], df["ball_y"], color="red", lw=2, ls="--", label="Ball path")
@@ -86,20 +97,20 @@ def plot_trajectory(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
     ax.scatter(df["ball_x"].iloc[-1], df["ball_y"].iloc[-1], c="red", marker="*", s=120, zorder=6)
     ax.legend(loc="upper left")
     fig.tight_layout()
-    path = out_dir / f"trajectory_seed_{seed}.png"
+    path = out_dir / "trajectory.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return str(path)
 
 
-def plot_errors(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
+def plot_errors(df: pd.DataFrame, seed: str, batch_id: str, out_dir: Path) -> str:
     steps = df["step"].values
     fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
     axes[0].plot(steps, df["pos_err"], color="#1565c0", lw=1.5)
     axes[0].axhline(0.2, color="gray", ls="--", lw=1, label="Threshold (0.2 m)")
     axes[0].set_ylabel("Position error (m)")
-    axes[0].set_title(f"Tracking Errors — Seed {seed}")
+    axes[0].set_title(f"Batch {batch_id} — Tracking Errors — Seed {seed}")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
@@ -111,17 +122,19 @@ def plot_errors(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
     axes[1].legend()
 
     fig.tight_layout()
-    path = out_dir / f"errors_seed_{seed}.png"
+    path = out_dir / "errors.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return str(path)
 
 
-def plot_integration_summary(seed_runs: list[tuple[str, Path]], out_dir: Path) -> str | None:
+def plot_integration_summary(
+    seed_runs: list[tuple[str, Path]], batch_id: str, out_dir: Path
+) -> str | None:
     if not seed_runs:
         return None
 
-    seeds, final_pos, final_head = [], [], []
+    seeds, final_pos, final_head, successes = [], [], [], []
     for seed, run_dir in seed_runs:
         csv_path = run_dir / TRAJECTORY_CSV
         if not csv_path.is_file():
@@ -130,21 +143,28 @@ def plot_integration_summary(seed_runs: list[tuple[str, Path]], out_dir: Path) -
         seeds.append(seed)
         final_pos.append(float(df["pos_err"].iloc[-1]))
         final_head.append(float(df["heading_err"].iloc[-1]))
+        meta_path = run_dir / RUN_METADATA
+        if meta_path.is_file():
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+            successes.append(bool(meta.get("success", False)))
+        else:
+            successes.append(final_pos[-1] <= 0.2 and final_head[-1] <= 0.15)
 
     if not seeds:
         return None
 
     x = np.arange(len(seeds))
     width = 0.35
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(x - width / 2, final_pos, width, label="Final pos err (m)", color="#1565c0")
     ax.bar(x + width / 2, final_head, width, label="Final heading err (rad)", color="#e65100")
     ax.axhline(0.2, color="#1565c0", ls="--", lw=1, alpha=0.6)
     ax.axhline(0.15, color="#e65100", ls="--", lw=1, alpha=0.6)
     ax.set_xticks(x)
-    ax.set_xticklabels(seeds)
+    ax.set_xticklabels([f"{s}\n({'OK' if ok else 'X'})" for s, ok in zip(seeds, successes)], fontsize=8)
     ax.set_xlabel("Seed")
-    ax.set_title("Integration Test — Final Errors per Seed")
+    ax.set_title(f"Integration Batch {batch_id} — Final Errors per Seed")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
@@ -167,7 +187,7 @@ def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, 
 
     device = torch.device("cpu")
     model = StrikeNet().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
 
     fig, axes = plt.subplots(2, 4, figsize=(14, 7))
@@ -182,10 +202,10 @@ def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, 
             np.abs(pred - gt),
             color=["#5c6bc0", "#26a69a", "#26a69a", "#ff7043"],
         )
-        ax.set_title(f"Sample {i}", fontsize=9)
+        ax.set_title(f"Dataset idx {i}", fontsize=9)
         ax.set_ylabel("|error|")
         ax.tick_params(axis="x", labelsize=8)
-    fig.suptitle("StrikeNet vs Ground Truth (random test samples)", fontsize=12)
+    fig.suptitle("StrikeNet vs Ground Truth (random dataset samples)", fontsize=12)
     fig.tight_layout()
     path = out_dir / "strikenet_sample_errors.png"
     fig.savefig(path, dpi=120)
@@ -193,73 +213,149 @@ def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, 
     return str(path)
 
 
-def resolve_seed_runs(batch_id: str | None, project_root: Path) -> list[tuple[str, Path]]:
+def write_batch_readme(
+    batch_id: str,
+    batch_dir: Path,
+    plot_batch_dir: Path,
+    seed_runs: list[tuple[str, Path]],
+) -> Path:
+    lines = [
+        f"# Integration batch `{batch_id}` — report plots",
+        "",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "## Source data (raw runs)",
+        "",
+        f"Each seed's simulation artifacts live under:",
+        "",
+        f"`data/tests/integration/{batch_id}/seed_<N>/`",
+        "",
+        "| Seed | Source run | Video | Trajectory | Metadata |",
+        "|------|------------|-------|------------|----------|",
+    ]
+    for seed, run_dir in seed_runs:
+        rel = run_dir.relative_to(PROJECT_ROOT).as_posix()
+        vid = "simulation.mp4" if (run_dir / "simulation.mp4").is_file() else "simulation.gif"
+        lines.append(
+            f"| {seed} | `{rel}/` | `{vid}` | `trajectory.csv` | `metadata.json` |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Plots in this folder",
+            "",
+            "- `integration_summary.png` — final errors for all seeds in this batch",
+            "- `seed_<N>/trajectory.png` — car/ball paths on the field",
+            "- `seed_<N>/errors.png` — position & heading error vs step",
+            "",
+            f"Batch log: `data/tests/integration/{batch_id}/batch.log`",
+            "",
+        ]
+    )
+    readme = plot_batch_dir / "README.md"
+    readme.write_text("\n".join(lines), encoding="utf-8")
+    return readme
+
+
+def resolve_batch(batch_id: str | None) -> tuple[str | None, Path | None, list[tuple[str, Path]]]:
     if batch_id:
-        batch_dir = project_root / "data" / "tests" / "integration" / batch_id
+        batch_dir = INTEGRATION_TESTS_DIR / batch_id
         if batch_dir.is_dir():
-            return list(iter_integration_seed_runs(batch_dir))
+            return batch_id, batch_dir, list(iter_integration_seed_runs(batch_dir))
 
     latest = latest_integration_batch()
     if latest is not None:
-        return list(iter_integration_seed_runs(latest))
-    return []
+        return latest.name, latest, list(iter_integration_seed_runs(latest))
+    return None, None, []
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate Phase 4 report plots")
-    parser.add_argument("--output-dir", type=str, default=str(PLOTS_DIR))
+    parser = argparse.ArgumentParser(description="Generate Phase 4 report plots (batch-organized)")
     parser.add_argument(
         "--batch",
         type=str,
         default=None,
-        help="Integration test batch id (default: latest under data/tests/integration/)",
+        help="Integration batch id (default: latest under data/tests/integration/)",
     )
     parser.add_argument("--training-log", type=str, default=str(TRAINING_LOG))
     parser.add_argument("--dataset", type=str, default=str(STRIKE_DATASET))
     parser.add_argument(
         "--model",
         type=str,
-        default=os.path.join(PROJECT_ROOT, "models", "strategy_net.pth"),
+        default=str(PROJECT_ROOT / "models" / "strategy_net.pth"),
     )
     args = parser.parse_args()
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    saved = []
+    saved: list[str] = []
+    global_dir = plots_global_dir()
 
     training_log = Path(args.training_log)
     if training_log.is_file():
-        saved.append(plot_training_curves(training_log, out_dir))
+        saved.append(plot_training_curves(training_log, global_dir))
 
-    seed_runs = resolve_seed_runs(args.batch, Path(PROJECT_ROOT))
-    summary = plot_integration_summary(seed_runs, out_dir)
-    if summary:
-        saved.append(summary)
-
-    for seed, run_dir in seed_runs:
-        csv_path = run_dir / TRAJECTORY_CSV
-        if not csv_path.is_file():
-            continue
-        df = pd.read_csv(csv_path)
-        saved.append(plot_trajectory(df, seed, out_dir))
-        saved.append(plot_errors(df, seed, out_dir))
-
-    sample_plot = plot_strikenet_samples(Path(args.dataset), Path(args.model), out_dir)
+    sample_plot = plot_strikenet_samples(Path(args.dataset), Path(args.model), global_dir)
     if sample_plot:
         saved.append(sample_plot)
+
+    batch_id, batch_dir, seed_runs = resolve_batch(args.batch)
+    if batch_id and batch_dir is not None:
+        plot_batch_root = plots_batch_dir(batch_id)
+        summary = plot_integration_summary(seed_runs, batch_id, plot_batch_root)
+        if summary:
+            saved.append(summary)
+
+        for seed, run_dir in seed_runs:
+            csv_path = run_dir / TRAJECTORY_CSV
+            if not csv_path.is_file():
+                continue
+            df = pd.read_csv(csv_path)
+            seed_plot_dir = plots_seed_dir(plot_batch_root, seed)
+            saved.append(plot_trajectory(df, seed, batch_id, seed_plot_dir))
+            saved.append(plot_errors(df, seed, batch_id, seed_plot_dir))
+
+        saved.append(str(write_batch_readme(batch_id, batch_dir, plot_batch_root, seed_runs)))
+
+    # Top-level plots README
+    plots_root = global_dir.parent
+    batches = list_integration_batches()
+    index_lines = [
+        "# Report plots index",
+        "",
+        "> **Note:** `training_curve.png` and `strikenet_sample_errors.png` are **not**",
+        "> in this folder root. They live under **`global/`** (batch-independent).",
+        "",
+        "## `global/`",
+        "",
+        "| File | Description |",
+        "|------|-------------|",
+        "| `global/training_curve.png` | StrikeNet train/test MSE from `data/training/training_log.csv` |",
+        "| `global/strikenet_sample_errors.png` | Model vs dataset labels (8 random samples) |",
+        "",
+        "## `integration/<batch_id>/`",
+        "",
+        "One folder per `python scripts/test_main.py` run (batch id = timestamp).",
+        "Per seed: `seed_<N>/trajectory.png`, `seed_<N>/errors.png`.",
+        "",
+    ]
+    if batches:
+        index_lines.append("Available batches (newest first):")
+        for b in batches:
+            index_lines.append(f"- `{b.name}` → `integration/{b.name}/`")
+    if batch_id:
+        index_lines.append(f"\n**Latest plotted batch:** `{batch_id}`")
+    (plots_root / "README.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
 
     print("=" * 60)
     print("  PHASE 4 — Plot Generation")
     print("=" * 60)
-    print(f"  Output directory: {out_dir}")
-    if seed_runs:
-        print(f"  Integration runs : {len(seed_runs)} seed folder(s)")
-    batches = list_integration_batches()
-    if batches:
-        print(f"  Latest batch     : {batches[0].name}")
+    print(f"  Global plots     : {global_dir}")
+    if batch_id:
+        print(f"  Batch plots      : {plots_batch_dir(batch_id)}")
+        print(f"  Seeds plotted    : {len(seed_runs)}")
     print(f"  Figures saved    : {len(saved)}")
     for p in saved:
-        print(f"    - {os.path.relpath(p, PROJECT_ROOT)}")
+        print(f"    - {Path(p).relative_to(PROJECT_ROOT).as_posix()}")
     print("=" * 60)
     return 0 if saved else 1
 
