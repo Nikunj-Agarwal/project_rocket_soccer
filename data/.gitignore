@@ -1,0 +1,9 @@
+# Data directory — git ignored
+*.npy
+*.pth
+*.png
+*.log
+*.csv
+phase_archives/
+pdf_inspection/
+static_target_test/
