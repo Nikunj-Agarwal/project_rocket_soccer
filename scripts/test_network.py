@@ -14,10 +14,11 @@ import torch
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, project_root)
 
+from src.data_layout import STRIKE_DATASET
 from src.network import StrikeNet
 
 def main():
-    data_path = os.path.join(project_root, "data", "strike_dataset.npy")
+    data_path = str(STRIKE_DATASET)
     model_path = os.path.join(project_root, "models", "strategy_net.pth")
     
     if not os.path.exists(data_path) or not os.path.exists(model_path):

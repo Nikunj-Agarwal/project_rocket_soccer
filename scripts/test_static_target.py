@@ -5,7 +5,7 @@ Drives the car from (1,3) to a STATIC target at (5,3) using the
 shrinking-horizon NMPC.  No ball movement, no neural network.
 
 Uses the non-interactive Agg backend (no popup windows).
-All output goes to both stdout AND a log file in data/static_target_test/.
+All output goes to data/tests/static/{batch_id}/ (trajectory, video, batch.log).
 
 Pass criteria:
   - Position error < 0.2 m
@@ -30,15 +30,16 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.data_layout import BATCH_LOG, TRAJECTORY_CSV, new_static_test_batch
+from src.recording import SimulationRecorder, render_and_capture
 from src.simulator import World
 from src.nmpc_solver import InterceptionMPC
 
 
-def setup_logging(log_dir: str) -> logging.Logger:
-    """Create a logger that writes to both a file and stdout."""
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"test_run_{timestamp}.log")
+def setup_logging(batch_dir: str) -> logging.Logger:
+    """Create a logger that writes to both batch.log and stdout."""
+    os.makedirs(batch_dir, exist_ok=True)
+    log_path = os.path.join(batch_dir, BATCH_LOG)
 
     logger = logging.getLogger("smoke_test")
     logger.setLevel(logging.DEBUG)
@@ -62,14 +63,9 @@ def setup_logging(log_dir: str) -> logging.Logger:
 
 
 def main():
-    # ------------------------------------------------------------------
-    # Output directories
-    # ------------------------------------------------------------------
-    output_dir = os.path.join(PROJECT_ROOT, "data", "static_target_test")
-    frames_dir = os.path.join(output_dir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-
-    log = setup_logging(output_dir)
+    batch_dir = new_static_test_batch()
+    log = setup_logging(str(batch_dir))
+    recorder = SimulationRecorder()
 
     # ------------------------------------------------------------------
     # Setup
@@ -150,11 +146,7 @@ def main():
             f"{solve_ms:6.1f}ms"
         )
 
-        # Save frame (no window needed thanks to Agg backend)
-        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-        world.render(ax=ax, title=f"Step {step}  |  pos_err={pos_err:.2f} m")
-        fig.savefig(os.path.join(frames_dir, f"frame_{step:03d}.png"), dpi=80)
-        plt.close(fig)
+        render_and_capture(world, f"Step {step}  |  pos_err={pos_err:.2f} m", recorder)
 
     # ------------------------------------------------------------------
     # Final evaluation
@@ -176,7 +168,9 @@ def main():
     log.info(f"  Solver failures      : {solver_failures}")
     log.info(f"  Avg solve time       : {total_solve_ms / N_total:.1f} ms")
     log.info(f"  Total solve time     : {total_solve_ms:.0f} ms")
-    log.info(f"  Frames saved to      : {frames_dir}")
+    video_path = recorder.save(batch_dir, fps=10.0)
+    if video_path:
+        log.info(f"  Simulation video     : {video_path}")
     log.info("-" * 65)
 
     passed = (
@@ -201,7 +195,7 @@ def main():
     # ------------------------------------------------------------------
     # Write CSV summary for easy post-analysis
     # ------------------------------------------------------------------
-    csv_path = os.path.join(output_dir, "trajectory.csv")
+    csv_path = os.path.join(batch_dir, TRAJECTORY_CSV)
     with open(csv_path, "w") as f:
         cols = list(history[0].keys())
         f.write(",".join(cols) + "\n")

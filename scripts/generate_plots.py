@@ -6,15 +6,15 @@ and optional StrikeNet vs ground-truth comparisons.
 
 Usage (striker env):
     python scripts/generate_plots.py
-    python scripts/generate_plots.py --results-dir data/integration_test_results
+    python scripts/generate_plots.py --batch 20260521_014736
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 import sys
+from pathlib import Path
 
 import matplotlib
 
@@ -27,6 +27,15 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.ball_physics import DEFAULT_FIELD_H, DEFAULT_FIELD_W
+from src.data_layout import (
+    PLOTS_DIR,
+    STRIKE_DATASET,
+    TRAINING_LOG,
+    TRAJECTORY_CSV,
+    iter_integration_seed_runs,
+    latest_integration_batch,
+    list_integration_batches,
+)
 
 GOAL_POS = (9.5, 3.0)
 FIELD_W = DEFAULT_FIELD_W
@@ -48,24 +57,24 @@ def _draw_field(ax, title: str = "") -> None:
         ax.set_title(title)
 
 
-def plot_training_curves(training_log: str, out_dir: str) -> str:
+def plot_training_curves(training_log: Path, out_dir: Path) -> str:
     df = pd.read_csv(training_log)
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(df["epoch"], df["train_loss"], label="Train MSE", lw=1.5)
     ax.plot(df["epoch"], df["test_loss"], label="Test MSE", lw=1.5)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss (MSE)")
-    ax.set_title("StrikeNet Training Curve (bounce-aware dataset)")
+    ax.set_title("StrikeNet Training Curve")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    path = os.path.join(out_dir, "training_curve.png")
+    path = out_dir / "training_curve.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
-    return path
+    return str(path)
 
 
-def plot_trajectory(df: pd.DataFrame, seed: str, out_dir: str) -> str:
+def plot_trajectory(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
     fig, ax = plt.subplots(figsize=(10, 6))
     _draw_field(ax, title=f"Interception Trajectory — Seed {seed}")
 
@@ -73,17 +82,17 @@ def plot_trajectory(df: pd.DataFrame, seed: str, out_dir: str) -> str:
     ax.plot(df["ball_x"], df["ball_y"], color="red", lw=2, ls="--", label="Ball path")
     ax.scatter(df["car_x"].iloc[0], df["car_y"].iloc[0], c="#1565c0", s=60, zorder=6)
     ax.scatter(df["ball_x"].iloc[0], df["ball_y"].iloc[0], c="red", s=60, zorder=6)
-    ax.scatter(df["car_x"].iloc[-1], df["car_y"].iloc[-1], c="#1565c0", marker="*", s=120, zorder=6, label="Car @ strike")
-    ax.scatter(df["ball_x"].iloc[-1], df["ball_y"].iloc[-1], c="red", marker="*", s=120, zorder=6, label="Ball @ strike")
+    ax.scatter(df["car_x"].iloc[-1], df["car_y"].iloc[-1], c="#1565c0", marker="*", s=120, zorder=6)
+    ax.scatter(df["ball_x"].iloc[-1], df["ball_y"].iloc[-1], c="red", marker="*", s=120, zorder=6)
     ax.legend(loc="upper left")
     fig.tight_layout()
-    path = os.path.join(out_dir, f"trajectory_seed_{seed}.png")
+    path = out_dir / f"trajectory_seed_{seed}.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
-    return path
+    return str(path)
 
 
-def plot_errors(df: pd.DataFrame, seed: str, out_dir: str) -> str:
+def plot_errors(df: pd.DataFrame, seed: str, out_dir: Path) -> str:
     steps = df["step"].values
     fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
@@ -102,24 +111,22 @@ def plot_errors(df: pd.DataFrame, seed: str, out_dir: str) -> str:
     axes[1].legend()
 
     fig.tight_layout()
-    path = os.path.join(out_dir, f"errors_seed_{seed}.png")
+    path = out_dir / f"errors_seed_{seed}.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
-    return path
+    return str(path)
 
 
-def plot_integration_summary(results_dir: str, out_dir: str) -> str | None:
-    run_dirs = sorted(glob.glob(os.path.join(results_dir, "run_seed_*")))
-    if not run_dirs:
+def plot_integration_summary(seed_runs: list[tuple[str, Path]], out_dir: Path) -> str | None:
+    if not seed_runs:
         return None
 
     seeds, final_pos, final_head = [], [], []
-    for run_dir in run_dirs:
-        csv_path = os.path.join(run_dir, "trajectory.csv")
-        if not os.path.isfile(csv_path):
+    for seed, run_dir in seed_runs:
+        csv_path = run_dir / TRAJECTORY_CSV
+        if not csv_path.is_file():
             continue
         df = pd.read_csv(csv_path)
-        seed = os.path.basename(run_dir).replace("run_seed_", "")
         seeds.append(seed)
         final_pos.append(float(df["pos_err"].iloc[-1]))
         final_head.append(float(df["heading_err"].iloc[-1]))
@@ -141,14 +148,14 @@ def plot_integration_summary(results_dir: str, out_dir: str) -> str | None:
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    path = os.path.join(out_dir, "integration_summary.png")
+    path = out_dir / "integration_summary.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
-    return path
+    return str(path)
 
 
-def plot_strikenet_samples(dataset_path: str, model_path: str, out_dir: str, n_samples: int = 8) -> str | None:
-    if not os.path.isfile(dataset_path) or not os.path.isfile(model_path):
+def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, n_samples: int = 8) -> str | None:
+    if not dataset_path.is_file() or not model_path.is_file():
         return None
 
     import torch
@@ -180,34 +187,35 @@ def plot_strikenet_samples(dataset_path: str, model_path: str, out_dir: str, n_s
         ax.tick_params(axis="x", labelsize=8)
     fig.suptitle("StrikeNet vs Ground Truth (random test samples)", fontsize=12)
     fig.tight_layout()
-    path = os.path.join(out_dir, "strikenet_sample_errors.png")
+    path = out_dir / "strikenet_sample_errors.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
-    return path
+    return str(path)
+
+
+def resolve_seed_runs(batch_id: str | None, project_root: Path) -> list[tuple[str, Path]]:
+    if batch_id:
+        batch_dir = project_root / "data" / "tests" / "integration" / batch_id
+        if batch_dir.is_dir():
+            return list(iter_integration_seed_runs(batch_dir))
+
+    latest = latest_integration_batch()
+    if latest is not None:
+        return list(iter_integration_seed_runs(latest))
+    return []
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Phase 4 report plots")
+    parser.add_argument("--output-dir", type=str, default=str(PLOTS_DIR))
     parser.add_argument(
-        "--output-dir",
+        "--batch",
         type=str,
-        default=os.path.join(PROJECT_ROOT, "data", "plots"),
+        default=None,
+        help="Integration test batch id (default: latest under data/tests/integration/)",
     )
-    parser.add_argument(
-        "--results-dir",
-        type=str,
-        default=os.path.join(PROJECT_ROOT, "data", "integration_test_results"),
-    )
-    parser.add_argument(
-        "--training-log",
-        type=str,
-        default=os.path.join(PROJECT_ROOT, "data", "training_log.csv"),
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default=os.path.join(PROJECT_ROOT, "data", "strike_dataset.npy"),
-    )
+    parser.add_argument("--training-log", type=str, default=str(TRAINING_LOG))
+    parser.add_argument("--dataset", type=str, default=str(STRIKE_DATASET))
     parser.add_argument(
         "--model",
         type=str,
@@ -215,34 +223,41 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     saved = []
 
-    if os.path.isfile(args.training_log):
-        saved.append(plot_training_curves(args.training_log, args.output_dir))
+    training_log = Path(args.training_log)
+    if training_log.is_file():
+        saved.append(plot_training_curves(training_log, out_dir))
 
-    summary = plot_integration_summary(args.results_dir, args.output_dir)
+    seed_runs = resolve_seed_runs(args.batch, Path(PROJECT_ROOT))
+    summary = plot_integration_summary(seed_runs, out_dir)
     if summary:
         saved.append(summary)
 
-    for run_dir in sorted(glob.glob(os.path.join(args.results_dir, "run_seed_*"))):
-        csv_path = os.path.join(run_dir, "trajectory.csv")
-        if not os.path.isfile(csv_path):
+    for seed, run_dir in seed_runs:
+        csv_path = run_dir / TRAJECTORY_CSV
+        if not csv_path.is_file():
             continue
-        seed = os.path.basename(run_dir).replace("run_seed_", "")
         df = pd.read_csv(csv_path)
-        saved.append(plot_trajectory(df, seed, args.output_dir))
-        saved.append(plot_errors(df, seed, args.output_dir))
+        saved.append(plot_trajectory(df, seed, out_dir))
+        saved.append(plot_errors(df, seed, out_dir))
 
-    sample_plot = plot_strikenet_samples(args.dataset, args.model, args.output_dir)
+    sample_plot = plot_strikenet_samples(Path(args.dataset), Path(args.model), out_dir)
     if sample_plot:
         saved.append(sample_plot)
 
     print("=" * 60)
     print("  PHASE 4 — Plot Generation")
     print("=" * 60)
-    print(f"  Output directory: {args.output_dir}")
-    print(f"  Figures saved: {len(saved)}")
+    print(f"  Output directory: {out_dir}")
+    if seed_runs:
+        print(f"  Integration runs : {len(seed_runs)} seed folder(s)")
+    batches = list_integration_batches()
+    if batches:
+        print(f"  Latest batch     : {batches[0].name}")
+    print(f"  Figures saved    : {len(saved)}")
     for p in saved:
         print(f"    - {os.path.relpath(p, PROJECT_ROOT)}")
     print("=" * 60)

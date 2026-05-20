@@ -26,6 +26,11 @@ from src.ball_physics import (
     DEFAULT_FIELD_W,
     propagate_ball_for_time,
 )
+from src.data_layout import (
+    BATCH_LOG,
+    new_integration_batch,
+    integration_seed_run,
+)
 from src.main import run_simulation
 
 
@@ -48,11 +53,10 @@ def check_bounce_target_consistency(
     )
     return np.linalg.norm(pos - expected_pos) <= tol
 
-def setup_logging(log_dir: str) -> logging.Logger:
-    """Create a logger that writes to both a file and stdout."""
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"integration_test_{timestamp}.log")
+def setup_logging(batch_dir: str) -> logging.Logger:
+    """Create a logger that writes to both batch.log and stdout."""
+    os.makedirs(batch_dir, exist_ok=True)
+    log_path = os.path.join(batch_dir, BATCH_LOG)
 
     logger = logging.getLogger("integration_test")
     logger.setLevel(logging.DEBUG)
@@ -75,8 +79,9 @@ def setup_logging(log_dir: str) -> logging.Logger:
     return logger
 
 def main():
-    output_dir = os.path.join(PROJECT_ROOT, "data", "integration_test_results")
-    log = setup_logging(output_dir)
+    batch_dir = new_integration_batch()
+    log = setup_logging(str(batch_dir))
+    log.info(f"Batch directory: {batch_dir}")
 
     # 10: strong downward ball (wall bounce); others: mixed field coverage
     seeds = [10, 21, 32, 43, 54]
@@ -120,13 +125,15 @@ def main():
         # Redirect standard output of run_simulation to avoid spamming the logs
         # but keep track of success
         try:
+            seed_run_dir = integration_seed_run(batch_dir, seed)
             success, pos_err, heading_err, history = run_simulation(
                 ball_start=ball_start,
                 ball_vel=ball_vel,
                 car_start=car_start,
                 render=False,
-                save_frames=True,
-                save_dir=os.path.join(output_dir, f"run_seed_{seed}"),
+                save_video=True,
+                run_dir=seed_run_dir,
+                run_metadata={"test": "integration", "seed": seed},
             )
             
             pos_errors.append(pos_err)

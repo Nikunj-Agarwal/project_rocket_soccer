@@ -2,7 +2,7 @@
 network.py — Phase 2
 
 Defines the StrikeNet MLP and the training loop.
-Trains on data/strike_dataset.npy and saves the best model to models/strategy_net.pth.
+Trains on data/dataset/strike_dataset.npy and saves the best model to models/strategy_net.pth.
 """
 
 import os
@@ -176,9 +176,9 @@ def train(data_path: str, model_path: str, log_path: str):
     print(f"Training log saved to {log_path}.")
 
 if __name__ == "__main__":
+    from src.data_layout import STRIKE_DATASET, TRAINING_LOG
+
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    data_path = os.path.join(project_root, "data", "strike_dataset.npy")
     model_path = os.path.join(project_root, "models", "strategy_net.pth")
-    log_path = os.path.join(project_root, "data", "training_log.csv")
-    
-    train(data_path, model_path, log_path)
+
+    train(str(STRIKE_DATASET), model_path, str(TRAINING_LOG))

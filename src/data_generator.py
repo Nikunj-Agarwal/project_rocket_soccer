@@ -140,7 +140,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Path relative to script location
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    out_path = os.path.join(project_root, "data", "strike_dataset.npy")
-    
-    generate_data(args.num_samples, out_path)
+    from src.data_layout import STRIKE_DATASET
+
+    generate_data(args.num_samples, str(STRIKE_DATASET))

@@ -6,20 +6,28 @@ queries StrikeNet for a target interception point, and runs the
 shrinking-horizon NMPC loop using InterceptionMPC.
 """
 
+import json
 import os
 import sys
 import argparse
 import time
+from pathlib import Path
+
 import numpy as np
 import torch
 import matplotlib
-import matplotlib.pyplot as plt
 
 # Add project root to path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.data_layout import (
+    RUN_METADATA,
+    TRAJECTORY_CSV,
+    new_manual_run,
+)
+from src.recording import SimulationRecorder, render_and_capture
 from src.ball_physics import (
     DEFAULT_BALL_DT,
     DEFAULT_BALL_RESTITUTION,
@@ -38,8 +46,10 @@ def run_simulation(
     goal_pos: np.ndarray = np.array([9.5, 3.0]),
     model_path: str = None,
     render: bool = False,
-    save_frames: bool = True,
-    save_dir: str = None,
+    save_video: bool = False,
+    run_dir: str | Path | None = None,
+    video_fps: float = 10.0,
+    run_metadata: dict | None = None,
     v_impact: float = 1.0,
     field_size: tuple = (DEFAULT_FIELD_W, DEFAULT_FIELD_H),
     ball_restitution: float = DEFAULT_BALL_RESTITUTION,
@@ -127,12 +137,11 @@ def run_simulation(
     R_weights = np.diag([0.01, 0.01])
     mpc = InterceptionMPC(dt=dt, Q_terminal=Q_term, R=R_weights)
 
-    # Prepare directories for frame saving
-    if save_frames and save_dir:
-        frames_dir = os.path.join(save_dir, "frames")
-        os.makedirs(frames_dir, exist_ok=True)
-    else:
-        frames_dir = None
+    run_path = Path(run_dir) if run_dir else None
+    if run_path is not None:
+        run_path.mkdir(parents=True, exist_ok=True)
+
+    recorder = SimulationRecorder() if (save_video and run_path) else None
 
     # Setup rendering backend
     if not render:
@@ -187,14 +196,12 @@ def run_simulation(
         }
         history.append(step_data)
 
-        # Save rendering frame if requested
-        if save_frames and frames_dir:
-            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            world.render(ax=ax, title=f"Step {step} | N_rem={N_remaining} | pos_err={pos_err:.2f}m")
-            fig.savefig(os.path.join(frames_dir, f"frame_{step:03d}.png"), dpi=80)
-            plt.close(fig)
+        title = f"Step {step} | N_rem={N_remaining} | pos_err={pos_err:.2f}m"
+        if recorder is not None:
+            render_and_capture(world, title, recorder)
         elif render:
-            world.render(title=f"Step {step} | N_rem={N_remaining} | pos_err={pos_err:.2f}m")
+            import matplotlib.pyplot as plt
+            world.render(title=title)
 
     # Final evaluation
     final_car = world.car_state
@@ -228,13 +235,35 @@ def run_simulation(
         success = False
     print("-" * 65)
 
-    # Save trajectory to CSV
-    if save_dir:
-        csv_path = os.path.join(save_dir, "trajectory.csv")
-        os.makedirs(save_dir, exist_ok=True)
+    if run_path is not None:
         import pandas as pd
+
+        csv_path = run_path / TRAJECTORY_CSV
         pd.DataFrame(history).to_csv(csv_path, index=False)
         print(f"Trajectory saved to {csv_path}")
+
+        if recorder is not None:
+            video_path = recorder.save(run_path, fps=video_fps)
+            if video_path:
+                print(f"Simulation video saved to {video_path}")
+
+        meta = {
+            "success": success,
+            "final_pos_err_m": float(final_pos_err),
+            "final_heading_err_rad": float(final_heading_err),
+            "solver_failures": solver_failures,
+            "N_steps": N_steps,
+            "T_final_s": float(T_final),
+            "ball_restitution": ball_restitution,
+            "field_size_m": list(field_size),
+            "strike_target": [x_strike_exact, y_strike_exact, theta_strike_exact],
+        }
+        if run_metadata:
+            meta.update(run_metadata)
+        meta_path = run_path / RUN_METADATA
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        print(f"Run metadata saved to {meta_path}")
 
     return success, final_pos_err, final_heading_err, history
 
@@ -242,8 +271,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--render", action="store_true", help="Interactive rendering")
-    parser.add_argument("--save-frames", action="store_true", help="Save frames to disk")
-    parser.add_argument("--save-dir", type=str, default=os.path.join(PROJECT_ROOT, "data", "interception_run"), help="Directory for logs and frames")
+    parser.add_argument("--save-video", action="store_true", help="Save trajectory CSV + simulation.mp4")
+    parser.add_argument("--run-dir", type=str, default=None, help="Output run directory (default: data/runs/manual/...)")
+    parser.add_argument("--video-fps", type=float, default=10.0, help="FPS for saved simulation video")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -272,11 +302,22 @@ if __name__ == "__main__":
     print(f"Ball start: {ball_start} | Vel: {ball_vel}")
     print(f"Car start : {car_start}")
 
+    run_dir = args.run_dir
+    if args.save_video and run_dir is None:
+        run_dir = str(new_manual_run(seed=args.seed))
+
     run_simulation(
         ball_start=ball_start,
         ball_vel=ball_vel,
         car_start=car_start,
         render=args.render,
-        save_frames=args.save_frames,
-        save_dir=args.save_dir,
+        save_video=args.save_video,
+        run_dir=run_dir,
+        video_fps=args.video_fps,
+        run_metadata={
+            "seed": args.seed,
+            "ball_start": ball_start.tolist(),
+            "ball_vel": ball_vel.tolist(),
+            "car_start": car_start.tolist(),
+        },
     )

@@ -1,9 +1,26 @@
-# Data directory — git ignored
+# Runtime artifacts (structure kept via .gitkeep files)
+dataset/*
+!dataset/.gitkeep
+training/*
+!training/.gitkeep
+reports/**/*
+!reports/.gitkeep
+!reports/plots/.gitkeep
+tests/**/*
+!tests/.gitkeep
+!tests/integration/.gitkeep
+!tests/static/.gitkeep
+runs/**/*
+!runs/.gitkeep
+!runs/manual/.gitkeep
+
+# Generated media and logs
 *.npy
-*.pth
-*.png
 *.log
 *.csv
+*.png
+*.mp4
+*.gif
+
 phase_archives/
 pdf_inspection/
-static_target_test/
