@@ -1,149 +1,100 @@
-# Pipeline logic
+# Pipeline Logic — Phase 5 Striker
 
-## Offline: dataset → StrikeNet
+## 🖥️ Offline Pipeline: Data to Model
 
-### 1. Data generation (`python -m src.data_generator`)
+```mermaid
+flowchart TD
+  A[Sample Random Scene] --> B{Reachability Sweep T}
+  B -- Reachable --> C{Sweep 1D θ_strike for Goal}
+  C -- Scores --> D[Save Sample]
+  C -- Misses --> E[Try next T / Reject]
+  D --> F[strike_dataset.npy]
+  F --> G[Extract sin/cos θ_strike]
+  G --> H[Train StrikeNet MLP]
+  H --> I[Save models/strategy_net.pth]
+```
 
-For each accepted sample:
+### 1. Data Generation (`python -m src.data_generator`)
+For each sample scene:
+1. Initialize random ball and car parameters.
+2. For increasing $T \in [0.5, 5.0]$ s (in steps of $0.05$ s):
+   - Propagate ball position $\mathbf{p}_b(T)$ using `propagate_ball_for_time` (with bounces).
+   - Check if $\mathbf{p}_b(T)$ is reachable by the car under the kinodynamic bi-arc and speed profiles.
+   - If reachable, perform a 1D sweep over $\theta_{strike} \in [-\pi, \pi]$ (36 candidates).
+   - For each candidate, compute post-collision ball velocity $\mathbf{v}_{ball}^{post}$ with $v_{impact} = 1.0$ m/s, propagate for 5.0s, and check if it crosses the goal mouth.
+   - The first $T$ and $\theta_{strike}$ that result in a goal are chosen as the training labels.
+3. Save raw labels: `[ball_x, ball_y, ball_vx, ball_vy, car_x, car_y, car_theta, T_strike, x_strike, y_strike, theta_strike]`.
 
-1. Draw random ball and car initial conditions (see [PHYSICS_CONSTRAINTS_ASSUMPTIONS.md](PHYSICS_CONSTRAINTS_ASSUMPTIONS.md)).
-2. For increasing time `T`, integrate ball with `propagate_ball_step` (incremental, same as simulator).
-3. Stop at the **smallest** `T` where:
-   - ball at `T` is **on the field**, and
-   - car can reach that point under the bi-arc + `d_max(T)` model.
-4. Store row:  
-   `[b_x, b_y, b_vx, b_vy, c_x, c_y, c_θ, T, x_strike, y_strike, θ_strike]`.
-
-Output: `data/dataset/strike_dataset.npy`, shape `(N, 11)`.
-
-### 2. Training (`python -m src.network`)
-
-- MLP **StrikeNet**: 7 inputs → 4 outputs.
-- Loss: MSE on all outputs (normalized internally during training).
-- Logs: `data/training/training_log.csv`.
-- Weights: `models/strategy_net.pth` (GPU if CUDA available).
-
-**Assumption:** Imitation learning from geometric labels is sufficient; no RL in the loop.
+### 2. Training Transformation (`python -m src.network`)
+To avoid discontinuities when mapping angular headings near $\pm\pi$, the training loop transforms $\theta_{strike}$ into sine and cosine components:
+$$\mathbf{y}_{train} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
+* **Architecture**: Multi-Layer Perceptron (MLP) with layer sizes `Input(7) -> 128 -> 128 -> 64 -> Output(5)`.
+* **Loss**: Mean Squared Error (MSE) computed across all 5 outputs.
 
 ---
 
-## Online: one interception run (`run_simulation` in `main.py`)
+## 🏃 Online Loop: Two-Phase Execution (`main.py`)
 
-### Step A — StrikeNet inference
+### Phase 1: NMPC Interception
+1. **StrikeNet Inference**: Maps the initial 7-D scene configuration to predicted values:
+   $$\text{preds} = [T_{strike}, x_{strike\_pred}, y_{strike\_pred}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
+2. **Reconstruct Angle**: $\theta_{strike\_pred} = \text{arctan2}(\sin(\theta_{strike}), \cos(\theta_{strike}))$.
+3. **Horizon Steps**: Calculate discrete steps: $N_{steps} = \text{clip}(\text{round}(T_{strike} / \Delta t), 1, 50)$.
+4. **Bounce Integration**: Integrate the shared physics engine up to $T_{final} = N_{steps} \Delta t$ to find the exact bounce-correct ball position $\mathbf{p}_{strike\_exact}$.
+5. **Exact Angle Sweep**: Sweep candidate angles around $\theta_{strike\_pred}$ to find the exact heading $\theta_{strike\_exact}$ that directs the ball into the goal.
+6. **Offset Target**: Apply $d_{offset} = 0.32$ m behind the ball center:
+   $$\mathbf{q}_{strike} = \left[ x_{exact} - d_{offset}\cos(\theta_{exact}),\ y_{exact} - d_{offset}\sin(\theta_{exact}),\ \theta_{exact},\ v_{impact} \right]$$
+7. **NMPC Loop**: For $k = 0 \rightarrow N_{steps} - 1$:
+   - Solve NMPC using `InterceptionMPC` with horizon $N_{remaining} = N_{steps} - k$.
+   - Apply first control action $u_0$.
+   - If a collision is detected (`dist < 0.35` m), set `ball_struck = True` and **break** out of Phase 1 immediately.
 
-```text
-inputs = [ball_x, ball_y, ball_vx, ball_vy, car_x, car_y, car_theta]
-preds  = model.predict(inputs)  → [T_strike, x_pred, y_pred, theta_pred]
-N_steps = clip(round(T_strike / dt), 1, 50)
-T_final = N_steps * dt
-```
-
-`x_pred, y_pred` are printed for debugging; **MPC does not use them as the terminal position.**
-
-### Step B — Bounce-correct strike target
-
-```text
-strike_pos = propagate_ball_for_time(ball_start, ball_vel, T_final, ...)
-theta_strike = atan2(goal_y - strike_pos.y, goal_x - strike_pos.x)
-q_strike = [strike_pos.x, strike_pos.y, theta_strike, v_impact]
-```
-
-This matches training physics: terminal NMPC state is where the ball **will be** at `T_final` given bounces.
-
-### Step C — Shrinking-horizon NMPC
-
-For `step = 0 .. N_steps-1`:
-
-```text
-N_remaining = N_steps - step
-u0 = mpc.solve(car_state, q_strike, N_remaining)
-world.step(u0)
-```
-
-- Horizon **shrinks** each step (`N_remaining` decreases).
-- Terminal cost always targets the **same** `q_strike` (fixed intercept pose).
-- Errors logged each step:
-  - `pos_err` = ‖car_xy − ball_xy‖
-  - `heading_err` = |wrap(car_θ − theta_strike)|
-
-### Step D — Success
-
-After the last step:
-
-- `success` if `pos_err ≤ 0.2` and `heading_err ≤ 0.15`.
-- If `run_dir` set: write `trajectory.csv`, optional `simulation.mp4`, `metadata.json`.
+### Phase 2: Post-Strike Coasting and Braking
+1. For up to 50 steps (5.0 seconds):
+   - Apply active braking acceleration to the car: $a_{brake} = \text{clip}(-v_{car} / \Delta t, -2.0, 0.0)$.
+   - Propagate ball trajectory using the bounce-aware step model.
+   - If the ball segment crosses the goal line ($x = 10.0$ and $y \in [2.0, 4.0]$), set `scored = True` and **break**.
 
 ```mermaid
 sequenceDiagram
-  participant SN as StrikeNet
+  participant Main as main.py
+  participant Net as StrikeNet
   participant BP as ball_physics
   participant MPC as InterceptionMPC
-  participant W as World
+  participant World as World (Simulator)
 
-  SN->>SN: predict T_strike
-  SN->>BP: propagate_ball_for_time(T_final)
-  BP-->>MPC: q_strike
-  loop each step
-    MPC->>MPC: solve(N_remaining)
-    MPC->>W: step(u0)
-    W->>W: car RK4 + ball bounce
+  Main->>Net: predict(inputs)
+  Net-->>Main: [T, x_pred, y_pred, sin, cos]
+  Main->>BP: propagate_ball_for_time(T_final)
+  BP-->>Main: strike_pos
+  Main->>BP: sweep theta candidates for goal
+  BP-->>Main: theta_strike_exact
+  Main->>Main: Compute target offset q_strike
+  loop NMPC steps (Phase 1)
+    Main->>MPC: solve(state, q_strike, N_remaining)
+    MPC-->>Main: u0
+    Main->>World: step(u0)
+    World->>World: update car & ball physics
+    alt Collision Detected (dist < 0.35m)
+      World->>World: apply elastic strike velocity
+      Note over Main, World: Break Loop to Phase 2
+    end
+  end
+  loop Post-Strike steps (Phase 2)
+    Main->>World: step(a_brake)
+    World->>World: update ball flight & brake car
+    alt Scored Goal
+      Note over Main, World: Success! Break
+    end
   end
 ```
 
 ---
 
-## Integration test logic (`scripts/test_main.py`)
+## 🧪 Testing & Reporting Pipelines
 
-1. Create batch folder `data/tests/integration/{YYYYMMDD_HHMMSS}/`.
-2. For each seed in `DEFAULT_INTEGRATION_SEEDS` (10 seeds):
-   - `np.random.seed(seed)`, `torch.manual_seed(seed)`.
-   - Regenerate ball/car initial conditions (same distributions as `main.py`).
-   - `run_simulation(..., run_dir=.../seed_{N}/, save_video=True)`.
-3. Aggregate pass/fail; write `batch.log`.
+### Integration Tests (`scripts/test_main.py`)
+Runs 10 predefined seeds. Evaluates strike position and heading errors at the exact step preceding collision. Checks if the ball successfully scores, and checks that both vehicle and ball end up within the field bounds.
 
-**Consistency check:** metadata `strike_target` must equal `propagate_ball_for_time` at `T_final` (test helper `check_bounce_target_consistency`).
-
----
-
-## Report plots logic (`scripts/generate_plots.py`)
-
-Plots are **not** mixed in one flat folder anymore:
-
-```text
-data/reports/plots/
-  README.md
-  global/
-    training_curve.png
-    strikenet_sample_errors.png
-  integration/{batch_id}/
-    README.md              ← links to data/tests/integration/{batch_id}/
-    integration_summary.png
-    seed_{N}/
-      trajectory.png
-      errors.png
-```
-
-- **`--batch`** selects the integration run; default = latest batch under `data/tests/integration/`.
-- Each `seed_{N}/` under plots corresponds to the **same** `seed_{N}/` under `data/tests/integration/{batch_id}/` (source CSV/video/metadata).
-
-See [DATA_AND_REPORTS.md](DATA_AND_REPORTS.md).
-
----
-
-## Static target test (`scripts/test_static_target.py`)
-
-Sanity check with a **fixed** strike pose (no StrikeNet). Verifies NMPC + simulator alone. Outputs under `data/tests/static/{batch}/`.
-
----
-
-## Mental model: what must stay aligned
-
-| Quantity | Must match across |
-|----------|-------------------|
-| `dt` | `World`, `InterceptionMPC`, `ball_physics`, `main.py` |
-| `field_w`, `field_h` | generator, simulator, main, tests |
-| `restitution` | generator, simulator, main, tests |
-| Initial state sampling | `main.py`, `test_main.py` |
-| Ball integrator | `data_generator`, `ball_physics`, `World.step` |
-
-If any of these diverge, StrikeNet labels and runtime targets will disagree and intercepts will miss or leave the field.
+### Plot Generation (`scripts/generate_plots.py`)
+Generates loss curves, model validation error plots, and per-seed trajectory plots. All results are written to a structured folder under `data/reports/plots/integration/{batch_id}/` where batch ID represents the timestamp of the integration test.

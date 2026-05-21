@@ -9,12 +9,15 @@ import os
 import argparse
 import numpy as np
 
+from src.goal import Goal
 from src.ball_physics import (
     DEFAULT_BALL_DT,
     DEFAULT_BALL_RESTITUTION,
     DEFAULT_FIELD_H,
     DEFAULT_FIELD_W,
     propagate_ball_step,
+    propagate_ball_for_time,
+    compute_strike_velocity,
 )
 
 
@@ -26,12 +29,11 @@ def generate_data(
     ball_dt: float = DEFAULT_BALL_DT,
     ball_restitution: float = DEFAULT_BALL_RESTITUTION,
 ):
-    print(f"Generating {num_samples} samples using brute-force reachability (bounce-aware)...")
+    print(f"Generating {num_samples} samples using brute-force reachability (bounce & score-aware)...")
     print(f"  Field: {field_w}x{field_h} m | restitution={ball_restitution} | ball_dt={ball_dt}")
 
     # Constants
-    v_max = 2.0  # From Phase 1 simulator plan
-    goal_x, goal_y = 9.5, 3.0
+    goal = Goal() # default: x=10.0, y in [2.0, 4.0]
     
     # We will accumulate valid samples here
     valid_samples = []
@@ -55,6 +57,10 @@ def generate_data(
         
         # Sweep future time T from 0.5 to 5.0 s
         T_feasible = None
+        theta_strike_feasible = None
+        x_strike_feasible = None
+        y_strike_feasible = None
+        
         ball_pos = np.array([b_x, b_y], dtype=float)
         ball_vel_arr = np.array([b_vx, b_vy], dtype=float)
         t_current = 0.0
@@ -82,43 +88,66 @@ def generate_data(
             # Straight-line distance
             d = np.sqrt((b_T_x - c_x)**2 + (b_T_y - c_y)**2)
             
-            # Bi-arc path length approximation to account for turning radius and heading changes
-            # Line-of-sight angle from car to future ball position
-            theta_los = np.arctan2(b_T_y - c_y, b_T_x - c_x)
+            # Sweep theta_strike candidates to find one that scores AND is reachable
+            # Sweep 36 angles: from -pi to pi with step 2*pi / 36 (10 degrees)
+            theta_candidates = np.linspace(-np.pi, np.pi, 36, endpoint=False)
             
-            # Heading change from initial car heading to face target
-            dtheta_start = np.abs(np.arctan2(np.sin(theta_los - c_theta), np.cos(theta_los - c_theta)))
-            
-            # Desired final heading at strike (facing goal)
-            theta_strike = np.arctan2(goal_y - b_T_y, goal_x - b_T_x)
-            
-            # Heading change from line-of-sight to final heading
-            dtheta_end = np.abs(np.arctan2(np.sin(theta_strike - theta_los), np.cos(theta_strike - theta_los)))
-            
-            # Minimum turning radius R = L/tan(delta_max) = 0.3 m. Use R = 0.35 m for a slight acceleration/steering buffer.
-            R_turn = 0.35
-            d_effective = d + R_turn * (dtheta_start + dtheta_end)
-            
-            # Reachability check (accounting for acceleration from rest: a_max=2.0, v_max=2.0)
-            if T <= 1.0:
-                d_max = T ** 2
-            else:
-                d_max = 2.0 * T - 1.0
+            found_feasible_for_T = False
+            for theta_cand in theta_candidates:
+                # 1. Check if this strike orientation can redirect the ball into the goal.
+                # Assume impact speed is 1.0 m/s (matching v_impact in main.py)
+                v_post = compute_strike_velocity(ball_vel_arr, v_car=1.0, theta_car=theta_cand, e_strike=0.8)
                 
-            if d_effective <= d_max:
-                T_feasible = T
-                x_strike = b_T_x
-                y_strike = b_T_y
-                break # We found the minimum feasible T
+                # Propagate ball for up to 5.0 seconds
+                final_pos, _ = propagate_ball_for_time(
+                    ball_pos,
+                    v_post,
+                    total_time=5.0,
+                    dt=ball_dt,
+                    field_w=field_w,
+                    field_h=field_h,
+                    restitution=ball_restitution,
+                    goal=goal
+                )
+                
+                # If crossed the goal line within the goal mouth
+                if final_pos[0] >= goal.x - 1e-9 and goal.y_min <= final_pos[1] <= goal.y_max:
+                    # 2. Check if this specific orientation is reachable in time T.
+                    # Line-of-sight angle from car to future ball position
+                    theta_los = np.arctan2(b_T_y - c_y, b_T_x - c_x)
+                    
+                    # Heading change from initial car heading to face target
+                    dtheta_start = np.abs(np.arctan2(np.sin(theta_los - c_theta), np.cos(theta_los - c_theta)))
+                    
+                    # Heading change from line-of-sight to the desired strike heading
+                    dtheta_end = np.abs(np.arctan2(np.sin(theta_cand - theta_los), np.cos(theta_cand - theta_los)))
+                    
+                    # Minimum turning radius R = L/tan(delta_max) = 0.3 m. Use R = 0.35 m buffer
+                    R_turn = 0.35
+                    d_effective = d + R_turn * (dtheta_start + dtheta_end)
+                    
+                    # Reachability check (accounting for acceleration from rest: a_max=2.0, v_max=2.0)
+                    if T <= 1.0:
+                        d_max = T ** 2
+                    else:
+                        d_max = 2.0 * T - 1.0
+                        
+                    if d_effective <= d_max:
+                        T_feasible = T
+                        x_strike_feasible = b_T_x
+                        y_strike_feasible = b_T_y
+                        theta_strike_feasible = theta_cand
+                        found_feasible_for_T = True
+                        break
+            
+            if found_feasible_for_T:
+                break # Found minimum feasible T with a scoring heading
                 
         if T_feasible is not None:
-            # Required heading at strike to face the goal
-            theta_strike = np.arctan2(goal_y - y_strike, goal_x - x_strike)
-            
             # Store [inputs..., outputs...]
             sample = [
                 b_x, b_y, b_vx, b_vy, c_x, c_y, c_theta,  # Inputs
-                T_feasible, x_strike, y_strike, theta_strike # Outputs
+                T_feasible, x_strike_feasible, y_strike_feasible, theta_strike_feasible # Outputs
             ]
             valid_samples.append(sample)
             

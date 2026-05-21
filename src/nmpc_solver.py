@@ -169,12 +169,17 @@ class InterceptionMPC:
         opti.minimize(terminal_cost + control_cost)
 
         # ---- Solver options ----
-        p_opts = {"expand": True}
+        p_opts = {
+            "expand": True,
+            "print_time": False,
+            "verbose": False,
+        }
         s_opts = {
             "print_level": 0,
             "max_iter": 300,
             "tol": 1e-4,
             "acceptable_tol": 1e-3,
+            "sb": "yes",  # suppress IPOPT banner
         }
         opti.solver("ipopt", p_opts, s_opts)
 

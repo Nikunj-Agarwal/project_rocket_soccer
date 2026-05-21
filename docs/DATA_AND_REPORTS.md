@@ -1,112 +1,115 @@
-# Data layout and report plots
+# Data Layout and Report Plots — Phase 5
 
-Path helpers live in `src/data_layout.py`. This document explains how to find **which run** produced **which plot**.
+Path helpers are defined in `src/data_layout.py`. This document describes the file layout, how to link evaluation plots back to their raw runs, and the database schema of outputs.
 
-## Directory tree
+---
+
+## 📁 Directory Structure
 
 ```text
-data/
-├── dataset/strike_dataset.npy
-├── training/training_log.csv
-├── reports/plots/
-│   ├── README.md                         # index of batches
-│   ├── global/                           # not batch-specific
-│   │   ├── training_curve.png
-│   │   └── strikenet_sample_errors.png
-│   └── integration/{batch_id}/           # one folder per test_main.py run
-│       ├── README.md                     # table: seed → source run path
-│       ├── integration_summary.png
-│       └── seed_{N}/
-│           ├── trajectory.png
-│           └── errors.png
-├── tests/integration/{batch_id}/
-│   ├── batch.log
-│   └── seed_{N}/
-│       ├── trajectory.csv      # source data for plots
-│       ├── simulation.mp4
-│       └── metadata.json
-├── tests/static/{batch_id}/...
-└── runs/manual/manual_seed{N}_{timestamp}/...
+project_root/
+├── data/
+│   ├── dataset/
+│   │   └── strike_dataset.npy            # Generated training dataset
+│   ├── training/
+│   │   └── training_log.csv              # MSE metrics per training epoch
+│   ├── reports/plots/
+│   │   ├── README.md                     # Index of all generated test batches
+│   │   ├── global/                       # Batch-independent training statistics
+│   │   │   ├── training_curve.png
+│   │   │   └── strikenet_sample_errors.png
+│   │   └── integration/{batch_id}/       # Specific test batch directory
+│   │       ├── README.md                 # Summary links of seeds
+│   │       ├── integration_summary.png   # Performance chart for this batch
+│   │       └── seed_{N}/
+│   │           ├── trajectory.png        # Vehicle and ball paths
+│   │           └── errors.png            # Tracking errors vs steps
+│   └── tests/
+│       └── integration/{batch_id}/       # Raw test run logs & data
+│           ├── batch.log                 # Batch execution output
+│           └── seed_{N}/
+│               ├── trajectory.csv        # Numerical step series
+│               ├── simulation.mp4        # Rendered trajectory video
+│               └── metadata.json         # Episode configuration & metrics
+├── docs/
+│   ├── legacy/                           # Historic pre-Phase 5 documents
+│   │   ├── DATA_AND_REPORTS.md
+│   │   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
+│   │   ├── PIPELINE_LOGIC.md
+│   │   ├── README.md
+│   │   └── SYSTEM_OVERVIEW.md
+│   ├── DATA_AND_REPORTS.md               # (This document)
+│   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
+│   ├── PIPELINE_LOGIC.md
+│   ├── SYSTEM_OVERVIEW.md
+│   ├── UPDATE.md                         # Detailed update summary
+│   └── README.md                         # Docs index
+└── models/
+    └── strategy_net.pth                  # Trained StrikeNet PyTorch weights
 ```
 
-## Batch ID
+---
 
-Integration batches are named by **timestamp** when `test_main.py` starts:
-
+## 🏷️ Batch ID
+Integration test batches are organized by timestamp:
 ```text
 YYYYMMDD_HHMMSS
 ```
+*Example*: `20260522_035708` matches the run initiated on May 22, 2026 at 03:57:08.
 
-Example: `20260521_022824` → run started 2026-05-21 02:28:24.
+---
 
-**Always cite this ID** when comparing plots, videos, or logs.
+## 🔄 Linking Plots to Raw Runs
 
-## Linking plots ↔ raw runs
+| To find the source of: | Look in this directory: |
+| :--- | :--- |
+| **Trajectory plot** `seed_10/trajectory.png` | `data/tests/integration/{batch_id}/seed_10/` |
+| **Numeric series for errors** | `data/tests/integration/{batch_id}/seed_10/trajectory.csv` |
+| **Evaluation video** | `data/tests/integration/{batch_id}/seed_10/simulation.mp4` |
+| **Goal pass/fail metadata** | `data/tests/integration/{batch_id}/seed_10/metadata.json` |
 
-| You have | Look here |
-|----------|-----------|
-| Plot `.../plots/integration/20260521_022824/seed_10/trajectory.png` | Raw run `data/tests/integration/20260521_022824/seed_10/` |
-| Video for that seed | `.../seed_10/simulation.mp4` |
-| Numeric series for errors plot | `.../seed_10/trajectory.csv` columns `pos_err`, `heading_err` |
-| Pass/fail for one seed | `.../seed_10/metadata.json` → `"success"` |
-| Whole batch summary | `.../integration/20260521_022824/batch.log` |
+---
 
-Open `data/reports/plots/integration/{batch_id}/README.md` — it lists every seed and the exact source folder.
-
-## Generating plots
-
+## 📈 Generating Report Plots
+To regenerate plots for the latest integration batch:
 ```powershell
-conda activate striker
-cd D:\SNU\Semester_6\motion_planning\project_retry
-
-# Latest integration batch
 python scripts/generate_plots.py
-
-# Specific batch (if you have multiple)
-python scripts/generate_plots.py --batch 20260521_022824
+```
+Or for a specific historical batch:
+```powershell
+python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 ```
 
-**Global** figures (training curve, StrikeNet sample errors) always go to `plots/global/`.
+---
 
-**Per-batch** figures only appear under `plots/integration/{batch_id}/`.
+## 📝 Output Formats
 
-## Old flat layout (removed)
+### 1. `trajectory.csv` Column Fields
 
-Do **not** look for PNGs directly under `data/reports/plots/` (except `README.md`).
+| Column | Data Type | Meaning |
+| :--- | :--- | :--- |
+| `step` | int | Simulation time step index. |
+| `phase` | str | `"approach"` (NMPC phase) or `"post_strike"` (coasting/braking phase). |
+| `N_rem` | int | Remaining NMPC horizon (0 in Phase 2). |
+| `car_x`, `car_y`, `car_theta`, `car_v` | float | State variables of the kinematic bicycle model. |
+| `ball_x`, `ball_y` | float | Coordinates of the ball center. |
+| `u_acc` | float | Input acceleration command. |
+| `u_steer` | float | Input steering angle command. |
+| `pos_err` | float | Distance between the car center and the ball center. |
+| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). |
+| `solve_ms` | float | Execution time of NMPC solver in milliseconds. |
 
-| Old path (deleted) | New path |
-|--------------------|----------|
-| `plots/training_curve.png` | `plots/global/training_curve.png` |
-| `plots/strikenet_sample_errors.png` | `plots/global/strikenet_sample_errors.png` |
-| `plots/trajectory_seed_10.png` | `plots/integration/{batch}/seed_10/trajectory.png` |
-| `plots/errors_seed_7.png` | `plots/integration/{batch}/seed_7/errors.png` |
+### 2. `metadata.json` Fields
 
-Re-run after integration tests: `python scripts/generate_plots.py --batch <batch_id>`.
-
-## Git ignore
-
-`data/.gitignore` ignores generated `*.png`, `*.csv`, `*.mp4`, etc. Structure is kept via `.gitkeep` files; artifacts stay local.
-
-## trajectory.csv columns
-
-| Column | Meaning |
-|--------|---------|
-| `step` | MPC step index |
-| `N_rem` | Remaining horizon length |
-| `car_x`, `car_y`, `car_theta`, `car_v` | Car state after step |
-| `ball_x`, `ball_y` | Ball position after step |
-| `u_acc`, `u_steer` | Applied control |
-| `pos_err` | Distance car–ball |
-| `heading_err` | |car θ − strike θ| (wrapped) |
-| `solve_ms` | NMPC solve time |
-
-## metadata.json (integration / manual runs)
-
-Typical fields:
-
-- `success`, `final_pos_err_m`, `final_heading_err_rad`
-- `N_steps`, `T_final_s`, `ball_restitution`, `field_size_m`
-- `strike_target`: `[x, y, θ]` used by NMPC (bounce-correct)
-- `seed`, `ball_start`, `ball_vel`, `car_start` (when from tests/manual)
-
-StrikeNet raw `[T, x, y, θ]` predictions are **not** stored in metadata today (only console output).
+* `success` (bool): `True` if `scored` is `True` and `on_field` is `True`.
+* `final_pos_err_m` (float): Final position error at simulation termination.
+* `final_heading_err_rad` (float): Final heading error at simulation termination.
+* `solver_failures` (int): Number of steps NMPC failed to converge.
+* `N_steps` (int): Interception horizon steps.
+* `T_final_s` (float): Predicted interception time.
+* `ball_restitution` (float): Wall coefficient of restitution.
+* `field_size_m` (list of float): `[W, H]`.
+* `strike_target` (list of float): `[x_target, y_target, theta_target]` containing the bounce-correct offset target.
+* `scored` (bool): `True` if ball crossed the goal line.
+* `ball_struck` (bool): `True` if collision occurred.
+* `strike_step` (int): The step index where collision occurred.

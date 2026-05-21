@@ -34,16 +34,18 @@ from src.ball_physics import (
     DEFAULT_FIELD_H,
     DEFAULT_FIELD_W,
     propagate_ball_for_time,
+    compute_strike_velocity,
 )
 from src.simulator import World
 from src.nmpc_solver import InterceptionMPC
 from src.network import StrikeNet
+from src.goal import Goal
 
 def run_simulation(
     ball_start: np.ndarray,
     ball_vel: np.ndarray,
     car_start: np.ndarray,
-    goal_pos: np.ndarray = np.array([9.5, 3.0]),
+    goal: Goal = None,
     model_path: str = None,
     render: bool = False,
     save_video: bool = False,
@@ -58,6 +60,9 @@ def run_simulation(
     """
     Runs the closed-loop shrinking-horizon NMPC simulation.
     """
+    if goal is None:
+        goal = Goal()
+
     # 1. Load the trained StrikeNet model
     if model_path is None:
         model_path = os.path.join(PROJECT_ROOT, "models", "strategy_net.pth")
@@ -101,7 +106,7 @@ def run_simulation(
     # Bounce-aware ball position at T_final (matches World.step physics)
     T_final = N_steps * dt
     field_w, field_h = field_size
-    strike_pos, _ = propagate_ball_for_time(
+    strike_pos, strike_vel = propagate_ball_for_time(
         ball_start,
         ball_vel,
         T_final,
@@ -112,13 +117,40 @@ def run_simulation(
     )
     x_strike_exact = float(strike_pos[0])
     y_strike_exact = float(strike_pos[1])
-    theta_strike_exact = np.arctan2(goal_pos[1] - y_strike_exact, goal_pos[0] - x_strike_exact)
+    
+    # Sweep candidates at runtime to find exact scoring heading
+    theta_candidates = np.linspace(-np.pi, np.pi, 36, endpoint=False)
+    best_theta = None
+    for theta_cand in theta_candidates:
+        v_post = compute_strike_velocity(strike_vel, v_car=v_impact, theta_car=theta_cand, e_strike=0.8)
+        final_pos, _ = propagate_ball_for_time(
+            strike_pos,
+            v_post,
+            total_time=5.0,
+            dt=dt,
+            field_w=field_w,
+            field_h=field_h,
+            restitution=ball_restitution,
+            goal=goal,
+        )
+        if final_pos[0] >= goal.x - 1e-9 and goal.y_min <= final_pos[1] <= goal.y_max:
+            best_theta = theta_cand
+            break
+            
+    if best_theta is None:
+        # Fallback to line of sight to goal center
+        best_theta = np.arctan2(goal.center[1] - y_strike_exact, goal.center[0] - x_strike_exact)
+        
+    theta_strike_exact = best_theta
 
     print(f"  Ball bounce           : restitution={ball_restitution}, field={field_w}x{field_h} m")
     print(f"  Exact strike target   : x={x_strike_exact:.3f} m, y={y_strike_exact:.3f} m, theta={theta_strike_exact:+.3f} rad")
     print("-" * 65)
     
-    q_strike = np.array([x_strike_exact, y_strike_exact, theta_strike_exact, v_impact])
+    offset_dist = 0.32
+    x_target = x_strike_exact - offset_dist * np.cos(theta_strike_exact)
+    y_target = y_strike_exact - offset_dist * np.sin(theta_strike_exact)
+    q_strike = np.array([x_target, y_target, theta_strike_exact, v_impact])
     
     # Save the original theta_strike for logging/error evaluation
     theta_strike_eval = theta_strike_exact
@@ -128,10 +160,11 @@ def run_simulation(
         car_state=car_start.copy(),
         ball_pos=ball_start.copy(),
         ball_vel=ball_vel.copy(),
-        goal_pos=goal_pos.copy(),
+        goal_pos=goal.center,
         dt=dt,
         field_size=field_size,
         ball_restitution=ball_restitution,
+        goal=goal,
     )
     Q_term = np.diag([500.0, 500.0, 100.0, 1.0])
     R_weights = np.diag([0.01, 0.01])
@@ -147,10 +180,12 @@ def run_simulation(
     if not render:
         matplotlib.use("Agg")
 
-    # 5. Shrinking-Horizon Loop
+    # 5. Phase 1: NMPC Interception & Strike Loop
     history = []
     solver_failures = 0
     total_solve_ms = 0.0
+    struck = False
+    strike_step = None
 
     print("Running shrinking-horizon NMPC simulation...")
     for step in range(N_steps):
@@ -181,6 +216,7 @@ def run_simulation(
 
         step_data = {
             "step": step,
+            "phase": "approach",
             "N_rem": N_remaining,
             "car_x": world.car_state[0],
             "car_y": world.car_state[1],
@@ -203,6 +239,50 @@ def run_simulation(
             import matplotlib.pyplot as plt
             world.render(title=title)
 
+        if world.ball_struck:
+            struck = True
+            strike_step = step
+            print(f"Collision/Strike detected at step {step}!")
+            break
+
+    # 6. Phase 2: Post-Strike Coasting & Ball Flight
+    POST_STRIKE_STEPS = 50 # up to 5 seconds
+    print("Running post-strike propagation...")
+    for post_step in range(POST_STRIKE_STEPS):
+        if world.scored:
+            print("Ball entered the goal!")
+            break
+
+        # Active braking to decelerate the car and keep it on the field
+        v_car = world.car_state[3]
+        a_brake = np.clip(-v_car / dt, -2.0, 0.0) if v_car > 0 else 0.0
+        world.step(np.array([a_brake, 0.0]))
+
+        step_data = {
+            "step": (strike_step if strike_step is not None else N_steps) + 1 + post_step,
+            "phase": "post_strike",
+            "N_rem": 0,
+            "car_x": world.car_state[0],
+            "car_y": world.car_state[1],
+            "car_theta": world.car_state[2],
+            "car_v": world.car_state[3],
+            "ball_x": world.ball_pos[0],
+            "ball_y": world.ball_pos[1],
+            "u_acc": 0.0,
+            "u_steer": 0.0,
+            "pos_err": np.linalg.norm(world.car_state[:2] - world.ball_pos),
+            "heading_err": 0.0,
+            "solve_ms": 0.0,
+        }
+        history.append(step_data)
+
+        title = f"Post-strike step {post_step} | Scored: {world.scored}"
+        if recorder is not None:
+            render_and_capture(world, title, recorder)
+        elif render:
+            import matplotlib.pyplot as plt
+            world.render(title=title)
+
     # Final evaluation
     final_car = world.car_state
     final_ball = world.ball_pos
@@ -219,20 +299,17 @@ def run_simulation(
     print("=" * 65)
     print(f"  Final car state      : {final_car}")
     print(f"  Final ball state     : {final_ball}")
-    print(f"  Final position error : {final_pos_err:.4f} m (threshold: 0.2)")
-    print(f"  Final heading error  : {final_heading_err:.4f} rad (threshold: 0.15)")
+    print(f"  Final position error : {final_pos_err:.4f} m")
+    print(f"  Final heading error  : {final_heading_err:.4f} rad")
+    print(f"  Goal scored          : {world.scored}")
     print(f"  Solver failures      : {solver_failures}")
-    print(f"  Avg solve time       : {total_solve_ms / N_steps:.1f} ms")
+    print(f"  Avg solve time       : {total_solve_ms / max(1, step+1):.1f} ms")
     
-    passed_pos = (final_pos_err <= 0.2)
-    passed_heading = (final_heading_err <= 0.15)
-    
-    if passed_pos and passed_heading:
-        print("  [SUCCESS] GOAL!")
-        success = True
+    success = world.scored
+    if success:
+        print("  [SUCCESS] GOAL scored!")
     else:
-        print("  [FAILED] MISSED TARGET")
-        success = False
+        print("  [FAILED] MISSED GOAL")
     print("-" * 65)
 
     if run_path is not None:
@@ -257,6 +334,9 @@ def run_simulation(
             "ball_restitution": ball_restitution,
             "field_size_m": list(field_size),
             "strike_target": [x_strike_exact, y_strike_exact, theta_strike_exact],
+            "scored": bool(world.scored),
+            "ball_struck": bool(world.ball_struck),
+            "strike_step": strike_step,
         }
         if run_metadata:
             meta.update(run_metadata)
