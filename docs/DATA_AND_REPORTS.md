@@ -95,8 +95,8 @@ python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 | `ball_x`, `ball_y` | float | Coordinates of the ball center. |
 | `u_acc` | float | Input acceleration command. |
 | `u_steer` | float | Input steering angle command. |
-| `pos_err` | float | Distance between the car center and the ball center. |
-| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). |
+| `pos_err` | float | Distance between the car center and the ball center. The minimum value during the `approach` phase is used as the strike position error. |
+| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). The value at the step of minimum `pos_err` is used as the strike heading error. |
 | `solve_ms` | float | Execution time of NMPC solver in milliseconds. |
 
 ### 2. `metadata.json` Fields

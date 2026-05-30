@@ -38,7 +38,7 @@ flowchart LR
 | Layer | Module | Role |
 | :--- | :--- | :--- |
 | **Strategy** | `src/network.py` — **StrikeNet** | MLP that maps 7-D scene state $\rightarrow$ `[T_strike, x_strike, y_strike, sin(θ), cos(θ)]`. |
-| **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon MPC using CasADi/IPOPT to solve kinematic bicycle inputs. |
+| **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon MPC using CasADi/IPOPT with pursuit-based warm-start to solve kinematic bicycle inputs. |
 | **Simulation** | `src/simulator.py` — **World** | Updates car (RK4 integration) and ball (wall bounce and bumper collision). |
 | **Physics** | `src/ball_physics.py` | Implements shared wall-bounce physics and car-ball elastic collision dynamics. |
 | **Goal** | `src/goal.py` | Models the goal mouth geometry and checks crossing segments for scores. |

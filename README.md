@@ -44,7 +44,7 @@ python -m src.data_generator --num_samples 100000
 # 2) Train StrikeNet (uses GPU if CUDA available)
 python -m src.network
 
-# 3) Integration test — 10 seeds, each with trajectory + simulation.mp4 + metadata
+# 3) Integration test — 50 seeds (100–149), each with trajectory + simulation.mp4 + metadata
 python scripts/test_main.py
 
 # 4) Report plots → data/reports/plots/integration/{batch_id}/seed_{N}/
@@ -71,7 +71,7 @@ python src/main.py --seed 10 --save-video
 | `src/simulator.py` | World dynamics (RK4 car, ball propagation) + rendering |
 | `src/ball_physics.py` | Shared inelastic wall bounce and elastic car-ball collision models |
 | `src/goal.py` | Goal mouth segment definition and scoring check |
-| `src/nmpc_solver.py` | CasADi shrinking-horizon MPC with silenced solver logging |
+| `src/nmpc_solver.py` | CasADi shrinking-horizon MPC with pursuit-based warm-start and silenced solver logging |
 | `src/network.py` | StrikeNet MLP (7-D input to 5-D output) |
 | `src/main.py` | Closed-loop two-phase simulation (interception and braking/ball flight) |
 | `src/data_layout.py` | Canonical `data/` paths |

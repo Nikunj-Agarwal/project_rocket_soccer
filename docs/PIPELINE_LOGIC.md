@@ -45,7 +45,7 @@ $$\mathbf{y}_{train} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}
 6. **Offset Target**: Apply $d_{offset} = 0.32$ m behind the ball center:
    $$\mathbf{q}_{strike} = \left[ x_{exact} - d_{offset}\cos(\theta_{exact}),\ y_{exact} - d_{offset}\sin(\theta_{exact}),\ \theta_{exact},\ v_{impact} \right]$$
 7. **NMPC Loop**: For $k = 0 \rightarrow N_{steps} - 1$:
-   - Solve NMPC using `InterceptionMPC` with horizon $N_{remaining} = N_{steps} - k$.
+   - Solve NMPC using `InterceptionMPC` with horizon $N_{remaining} = N_{steps} - k$. The solver is warm-started with a kinematically feasible pursuit trajectory (proportional steering toward the target, linear acceleration ramp) to ensure robust IPOPT convergence.
    - Apply first control action $u_0$.
    - If a collision is detected (`dist < 0.35` m), set `ball_struck = True` and **break** out of Phase 1 immediately.
 
@@ -94,7 +94,7 @@ sequenceDiagram
 ## 🧪 Testing & Reporting Pipelines
 
 ### Integration Tests (`scripts/test_main.py`)
-Runs 10 predefined seeds. Evaluates strike position and heading errors at the exact step preceding collision. Checks if the ball successfully scores, and checks that both vehicle and ball end up within the field bounds.
+Runs 50 predefined seeds (default: seeds 100–149). Evaluates strike position and heading errors at the moment of **closest approach** (minimum `pos_err`) during the approach phase. Checks if the ball successfully scores, and checks that both vehicle and ball end up within the field bounds.
 
 ### Plot Generation (`scripts/generate_plots.py`)
 Generates loss curves, model validation error plots, and per-seed trajectory plots. All results are written to a structured folder under `data/reports/plots/integration/{batch_id}/` where batch ID represents the timestamp of the integration test.

@@ -166,8 +166,8 @@ def run_simulation(
         ball_restitution=ball_restitution,
         goal=goal,
     )
-    Q_term = np.diag([500.0, 500.0, 100.0, 1.0])
-    R_weights = np.diag([0.01, 0.01])
+    Q_term = np.diag([3000.0, 3000.0, 300.0, 1.0])
+    R_weights = np.diag([0.005, 0.005])
     mpc = InterceptionMPC(dt=dt, Q_terminal=Q_term, R=R_weights)
 
     run_path = Path(run_dir) if run_dir else None

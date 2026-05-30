@@ -1,8 +1,8 @@
 """
-test_main.py — Phase 3 / 3.6 Integration Test
+test_main.py — Phase 5 Integration Test
 
 Runs the real-time simulation loop for distinct random seeds (including wall-bounce cases).
-Evaluates interception success, on-field final states, and bounce-parameter consistency.
+Evaluates goal scoring success, on-field final states, and strike precision metrics.
 """
 
 import argparse
@@ -11,6 +11,9 @@ import sys
 import numpy as np
 import torch
 import logging
+import json
+import subprocess
+import pandas as pd
 
 # Force non-interactive matplotlib backend BEFORE importing anything else
 import matplotlib
@@ -33,8 +36,8 @@ from src.data_layout import (
 )
 from src.main import run_simulation
 
-# Default batch: 10 seeds (includes 10 for wall-bounce case)
-DEFAULT_INTEGRATION_SEEDS = [10, 21, 32, 43, 54, 7, 14, 28, 35, 42]
+# Default batch: 50 seeds for a comprehensive evaluation
+DEFAULT_INTEGRATION_SEEDS = list(range(100, 150))
 
 
 def check_bounce_target_consistency(
@@ -88,7 +91,12 @@ def main():
         type=int,
         nargs="+",
         default=DEFAULT_INTEGRATION_SEEDS,
-        help="Random seeds to run (default: 10 seeds including seed 10)",
+        help="Random seeds to run (default: 50 seeds, 100-149)",
+    )
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Disable saving simulation videos for faster runs",
     )
     args = parser.parse_args()
     seeds = args.seeds
@@ -104,7 +112,7 @@ def main():
     heading_errors = []
 
     log.info("=" * 65)
-    log.info("  PHASE 3.6 INTEGRATION TEST — Bounce-Aware Interception Loop")
+    log.info("  PHASE 5 INTEGRATION TEST — Strike & Score with Pursuit Warm-Start")
     log.info(f"  Bounce: restitution={DEFAULT_BALL_RESTITUTION}, dt={DEFAULT_BALL_DT}, field={DEFAULT_FIELD_W}x{DEFAULT_FIELD_H}")
     log.info("=" * 65)
 
@@ -134,28 +142,60 @@ def main():
         log.info(f"  Ball start: {ball_start} | Vel: {ball_vel}")
         log.info(f"  Car start : {car_start}")
 
-        # Redirect standard output of run_simulation to avoid spamming the logs
-        # but keep track of success
+        # Run simulation in a subprocess to completely avoid CasADi/IPOPT memory leaks and segfaults
         try:
             seed_run_dir = integration_seed_run(batch_dir, seed)
-            success, pos_err, heading_err, history = run_simulation(
-                ball_start=ball_start,
-                ball_vel=ball_vel,
-                car_start=car_start,
-                render=False,
-                save_video=True,
-                run_dir=seed_run_dir,
-                run_metadata={"test": "integration", "seed": seed},
+            
+            # Setup command to run main.py as a subprocess
+            cmd = [
+                sys.executable,
+                os.path.join(PROJECT_ROOT, "src", "main.py"),
+                "--seed", str(seed),
+                "--run-dir", str(seed_run_dir)
+            ]
+            if not args.no_video:
+                cmd.append("--save-video")
+                
+            # Run the command and capture output
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
             )
             
-            # Extract interception errors at the moment of strike
-            approach_steps = [h for h in history if h.get("phase") == "approach"]
-            if approach_steps:
-                strike_pos_err = approach_steps[-1]["pos_err"]
-                strike_heading_err = approach_steps[-1]["heading_err"]
+            # Check for crash
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Subprocess failed with exit code {result.returncode}.\n"
+                    f"Stdout:\n{result.stdout}\n"
+                    f"Stderr:\n{result.stderr}"
+                )
+            
+            # Read metadata.json and trajectory.csv
+            meta_path = os.path.join(seed_run_dir, "metadata.json")
+            traj_path = os.path.join(seed_run_dir, "trajectory.csv")
+            
+            if not os.path.exists(meta_path) or not os.path.exists(traj_path):
+                raise FileNotFoundError(f"Subprocess completed but missing metadata or trajectory file in {seed_run_dir}")
+                
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            
+            df = pd.read_csv(traj_path)
+            history = df.to_dict(orient="records")
+            
+            success = meta["success"]
+            
+            # Extract interception errors at the actual moment of strike (closest approach / contact)
+            if history:
+                closest_step = min(history, key=lambda h: h["pos_err"])
+                strike_pos_err = closest_step["pos_err"]
+                strike_heading_err = closest_step["heading_err"]
             else:
-                strike_pos_err = pos_err
-                strike_heading_err = heading_err
+                strike_pos_err = meta["final_pos_err_m"]
+                strike_heading_err = meta["final_heading_err_rad"]
 
             pos_errors.append(strike_pos_err)
             heading_errors.append(strike_heading_err)
