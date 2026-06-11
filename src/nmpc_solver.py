@@ -55,6 +55,16 @@ class InterceptionMPC:
         self.Q_terminal = Q_terminal
         self.R = R
 
+        # Solver options (built once, reused every solve call)
+        self._p_opts = {"expand": True, "print_time": False, "verbose": False}
+        self._s_opts = {
+            "print_level": 0,
+            "max_iter": 300,
+            "tol": 1e-4,
+            "acceptable_tol": 1e-3,
+            "sb": "yes",  # suppress IPOPT banner
+        }
+
         # Build the symbolic RK4 integrator once
         self._build_integrator()
 
@@ -133,15 +143,13 @@ class InterceptionMPC:
             opti.subject_to(X[:, k + 1] == x_next)
 
         # ---- Bound constraints ----
-        for k in range(N_steps):
-            # Speed bounds
+        for k in range(N_steps + 1):
+            # Speed bounds (all N+1 states)
             opti.subject_to(opti.bounded(self.v_min, X[3, k], self.v_max))
-            # Acceleration bounds
-            opti.subject_to(opti.bounded(-self.a_max, U[0, k], self.a_max))
-            # Steering bounds
-            opti.subject_to(opti.bounded(-self.delta_max, U[1, k], self.delta_max))
-        # Terminal speed bound
-        opti.subject_to(opti.bounded(self.v_min, X[3, N_steps], self.v_max))
+            if k < N_steps:
+                # Acceleration and steering bounds (N controls)
+                opti.subject_to(opti.bounded(-self.a_max, U[0, k], self.a_max))
+                opti.subject_to(opti.bounded(-self.delta_max, U[1, k], self.delta_max))
 
         # ---- Objective ----
         # Terminal cost with angle-wrap-safe heading penalty
@@ -159,7 +167,7 @@ class InterceptionMPC:
         )
 
         # Running cost (control effort)
-        control_cost = 0
+        control_cost = 0.0
         for k in range(N_steps):
             control_cost += (
                 self.R[0, 0] * U[0, k] ** 2
@@ -168,20 +176,7 @@ class InterceptionMPC:
 
         opti.minimize(terminal_cost + control_cost)
 
-        # ---- Solver options ----
-        p_opts = {
-            "expand": True,
-            "print_time": False,
-            "verbose": False,
-        }
-        s_opts = {
-            "print_level": 0,
-            "max_iter": 300,
-            "tol": 1e-4,
-            "acceptable_tol": 1e-3,
-            "sb": "yes",  # suppress IPOPT banner
-        }
-        opti.solver("ipopt", p_opts, s_opts)
+        opti.solver("ipopt", self._p_opts, self._s_opts)
 
         # ---- Set parameter values ----
         opti.set_value(p_x0, current_state)

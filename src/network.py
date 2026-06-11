@@ -6,9 +6,7 @@ Trains on data/dataset/strike_dataset.npy and saves the best model to models/str
 """
 
 import os
-import time
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -56,7 +54,7 @@ class StrikeNet(nn.Module):
                 x = x.unsqueeze(0)
             
             # Forward pass
-            out = self.forward(x)  # (N, 5)
+            out = self(x)  # (N, 5)
             
             # Extract outputs
             T = out[:, 0].cpu().numpy()
@@ -72,7 +70,15 @@ class StrikeNet(nn.Module):
             preds = np.column_stack([T, x_s, y_s, theta])
             return preds[0] if preds.shape[0] == 1 else preds
 
-def train(data_path: str, model_path: str, log_path: str):
+def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
+    # Set seeds for research reproducibility
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     # Load data
     print(f"Loading data from {data_path}...")
     dataset_np = np.load(data_path)
@@ -174,6 +180,8 @@ def train(data_path: str, model_path: str, log_path: str):
                 break
                 
     # Save log
+    import pandas as pd
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     pd.DataFrame(log_data).to_csv(log_path, index=False)
     print(f"Training complete. Best model saved to {model_path}.")
     print(f"Training log saved to {log_path}.")

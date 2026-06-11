@@ -86,7 +86,7 @@ def generate_data(
                 continue
 
             # Straight-line distance
-            d = np.sqrt((b_T_x - c_x)**2 + (b_T_y - c_y)**2)
+            d = np.hypot(b_T_x - c_x, b_T_y - c_y)
             
             # Sweep theta_strike candidates to find one that scores AND is reachable
             # Sweep 36 angles: from -pi to pi with step 2*pi / 36 (10 degrees)
@@ -166,7 +166,10 @@ def generate_data(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_samples", type=int, default=100000)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+    
+    np.random.seed(args.seed)
     
     # Path relative to script location
     from src.data_layout import STRIKE_DATASET

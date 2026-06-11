@@ -152,9 +152,6 @@ def run_simulation(
     y_target = y_strike_exact - offset_dist * np.sin(theta_strike_exact)
     q_strike = np.array([x_target, y_target, theta_strike_exact, v_impact])
     
-    # Save the original theta_strike for logging/error evaluation
-    theta_strike_eval = theta_strike_exact
-
     # 4. Initialize World and InterceptionMPC
     world = World(
         car_state=car_start.copy(),
@@ -184,7 +181,6 @@ def run_simulation(
     history = []
     solver_failures = 0
     total_solve_ms = 0.0
-    struck = False
     strike_step = None
 
     print("Running shrinking-horizon NMPC simulation...")
@@ -210,8 +206,8 @@ def run_simulation(
         # Compute errors relative to current ball position
         pos_err = np.linalg.norm(world.car_state[:2] - world.ball_pos)
         heading_err = abs(np.arctan2(
-            np.sin(world.car_state[2] - theta_strike_eval),
-            np.cos(world.car_state[2] - theta_strike_eval)
+            np.sin(world.car_state[2] - theta_strike_exact),
+            np.cos(world.car_state[2] - theta_strike_exact)
         ))
 
         step_data = {
@@ -236,11 +232,9 @@ def run_simulation(
         if recorder is not None:
             render_and_capture(world, title, recorder)
         elif render:
-            import matplotlib.pyplot as plt
             world.render(title=title)
 
         if world.ball_struck:
-            struck = True
             strike_step = step
             print(f"Collision/Strike detected at step {step}!")
             break
@@ -268,7 +262,7 @@ def run_simulation(
             "car_v": world.car_state[3],
             "ball_x": world.ball_pos[0],
             "ball_y": world.ball_pos[1],
-            "u_acc": 0.0,
+            "u_acc": a_brake,
             "u_steer": 0.0,
             "pos_err": np.linalg.norm(world.car_state[:2] - world.ball_pos),
             "heading_err": 0.0,
@@ -280,7 +274,6 @@ def run_simulation(
         if recorder is not None:
             render_and_capture(world, title, recorder)
         elif render:
-            import matplotlib.pyplot as plt
             world.render(title=title)
 
     # Final evaluation
@@ -290,8 +283,8 @@ def run_simulation(
     
     # Wrap heading error
     final_heading_err = abs(np.arctan2(
-        np.sin(final_car[2] - theta_strike_eval),
-        np.cos(final_car[2] - theta_strike_eval)
+        np.sin(final_car[2] - theta_strike_exact),
+        np.cos(final_car[2] - theta_strike_exact)
     ))
 
     print("\n" + "=" * 65)

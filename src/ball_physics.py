@@ -142,7 +142,6 @@ def compute_strike_velocity(
     # To handle both cases robustly:
     if v_rel_n < 0:
         # Reflect relative normal velocity component
-        v_rel_n_post = -e_strike * v_rel_n
         v_rel_post = v_rel - (1.0 + e_strike) * v_rel_n * n
         return v_rel_post + v_car_vec
     else:

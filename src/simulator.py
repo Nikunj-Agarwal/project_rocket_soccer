@@ -14,6 +14,8 @@ import matplotlib
 
 from src.ball_physics import (
     DEFAULT_BALL_RESTITUTION,
+    DEFAULT_FIELD_W,
+    DEFAULT_FIELD_H,
     propagate_ball_step,
     compute_strike_velocity,
 )
@@ -28,8 +30,6 @@ from src.goal import Goal
 # ---------------------------------------------------------------------------
 DEFAULT_DT = 0.1          # s
 DEFAULT_WHEELBASE = 0.3   # m
-DEFAULT_FIELD_W = 10.0    # m
-DEFAULT_FIELD_H = 6.0     # m
 CAR_LENGTH = 0.4          # m  (for drawing only)
 CAR_WIDTH = 0.2           # m  (for drawing only)
 BALL_RADIUS = 0.1         # m  (for drawing only)
@@ -105,7 +105,7 @@ class World:
         self.car_state = np.array(car_state, dtype=float)
         self.ball_pos = np.array(ball_pos, dtype=float)
         self.ball_vel = np.array(ball_vel, dtype=float)
-        self.dt = dt = self.dt # preserve dt
+        # dt preserved — reset does not change the timestep
         
         if goal is not None:
             self.goal = goal
