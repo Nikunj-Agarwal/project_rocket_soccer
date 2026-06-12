@@ -11,6 +11,7 @@ Read these documents to understand the architecture, parameters, and pipelines o
 | **[RESEARCH_PAPER.md](RESEARCH_PAPER.md)** | Formal research paper: abstract, methodology, results, and references. |
 | **[LITERATURE_REVIEWS.md](LITERATURE_REVIEWS.md)** | Categorized academic references supporting the project design. |
 | **[UPDATE.md](UPDATE.md)** | Overview of the Phase 5 (Strike & Score) overhaul, including key design decisions, fixes, and validation benchmarks. |
+| **[FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md)** | Proposed (not implemented): predict only $(T, \theta)$ and derive strike position from ball physics. |
 | **[legacy/](legacy/)** | **[ARCHIVE]** Folder containing historic documentation versions prior to Phase 5. |
 
 For operational commands, see the root [README.md](../README.md).

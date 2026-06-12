@@ -1,7 +1,7 @@
 # Autonomous Soccer Striker: A Hybrid Approach using Imitation Learning and Non-linear Model Predictive Control
 
 ## Abstract
-This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) that predicts the interception time, strike position, and strike heading with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. The network's predicted strike plan drives the NMPC target directly; a physics-based scoring rollout validates each plan and an analytic interception point with a heading sweep is substituted only when the learned plan provably cannot score. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests over 50 randomized scenarios demonstrate a 74% goal-scoring success rate (with the network's prediction driving the controller end-to-end in 52% of episodes), an average strike position error of 0.334 m, and an average heading error of 0.070 rad.
+This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) that predicts the interception time, strike position, and strike heading with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. The network's predicted strike plan drives the NMPC target directly; a physics-based scoring rollout validates each plan and an analytic interception point with a heading sweep is substituted only when the learned plan provably cannot score. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests (default: 100 seeds, 100–199) use strike-gated success (`scored AND ball_struck`). In a representative 50-seed run (batch `20260612_155705`), the system achieved 74% success with the network's prediction driving execution in 52% of episodes; headline interception accuracy is measured by `strike_point_pred_err_m` (predicted target vs ball-at-contact), with closest-approach distance retained only as a diagnostic.
 
 ---
 
@@ -12,7 +12,7 @@ Purely analytical planners, while globally optimal in theory, suffer from prohib
 
 Hybrid control architectures that decompose the problem into a high-level learned strategy layer and a low-level optimization-based execution layer offer a promising middle ground [1, 2]. By relegating the combinatorial "when and where" decisions to a lightweight neural network and the precise "how to drive there" trajectory planning to a deterministic NMPC solver, each component operates within its area of strength.
 
-This paper proposes such a two-phase hybrid approach: a Multi-Layer Perceptron (StrikeNet) dictates the macroscopic strategy (predicting the optimal interception time and strike heading from an initial scene configuration), while a shrinking-horizon NMPC solver manages the microscopic execution (computing a kinematically feasible control sequence that drives the vehicle to the predicted strike point). We validate the system over 50 randomized integration test seeds spanning diverse approach angles, multi-bounce trajectories, and challenging initial headings.
+This paper proposes such a two-phase hybrid approach: a Multi-Layer Perceptron (StrikeNet) dictates the macroscopic strategy (predicting the optimal interception time, strike position, and strike heading from an initial scene configuration), while a shrinking-horizon NMPC solver manages the microscopic execution. At runtime there is a single hybrid mode — network prediction with a scoring-guard analytic fallback (`target_source` logged per episode); there is no selectable network-only or analytic-only mode. We validate the system over 100 randomized integration test seeds (default: 100–199) spanning diverse approach angles, multi-bounce trajectories, and challenging initial headings.
 
 <!-- 📊 FIGURE 1: System architecture block diagram (see SYSTEM_OVERVIEW.md mermaid flowchart).
      Show the two-phase pipeline: Offline (Data Generation → StrikeNet Training) and
@@ -53,7 +53,7 @@ To generate valid training data, the offline generator samples random initial st
 
 For increasing time horizons $T \in [0.5, 5.0]$ s (in steps of 0.05 s), the system calculates the ball's position at time $T$ using the shared bounce-aware integrator with wall restitution coefficient $e = 0.85$ on a 10.0 m × 6.0 m rectangular field. The generator then performs a joint reachability and scoring check:
 
-1. **Reachability**: Using a kinodynamic bi-arc path approximation, the system estimates whether the car can physically reach the ball's future position at time $T$. The effective distance accounts for initial heading misalignment and terminal orientation change, with a turning radius buffer of $R_{turn} = 0.35$ m. The maximum reachable distance follows a piecewise acceleration model: $d_{max} = T^2$ for $T \leq 1.0$ s (accelerating from rest at $a_{max} = 2.0$ m/s²), and $d_{max} = 2.0T - 1.0$ for $T > 1.0$ s (at maximum velocity $v_{max} = 2.0$ m/s).
+1. **Reachability** (`src/planner.py` — `max_reach_distance`, `analytic_strike_plan`): Using a kinodynamic bi-arc path approximation, the system estimates whether the car can physically reach the ball's future position at time $T$. The effective distance accounts for initial heading misalignment and terminal orientation change, with a turning radius buffer of $R_{turn} = 0.35$ m (legacy default; exact $L/\tan(\delta_{max}) = 0.30$ m deferred to a future regen). The maximum reachable distance follows a piecewise acceleration model: $d_{max} = T^2$ for $T \leq 1.0$ s (accelerating from rest at $a_{max} = 2.0$ m/s²), and $d_{max} = 2.0T - 1.0$ for $T > 1.0$ s (at maximum velocity $v_{max} = 2.0$ m/s).
 
 2. **Scoring Heading Sweep**: For each reachable $(T, \mathbf{p}_b)$ pair, the generator sweeps 36 angular candidates $\theta_{strike} \in [-\pi, \pi]$ to find headings that, after an elastic collision at impact speed $v_{impact} = 1.0$ m/s, redirect the ball into the goal mouth (the 2.0 m wide segment at $x = 10.0$ m, $y \in [2.0, 4.0]$ m). Post-collision ball trajectories are propagated for up to 5.0 s to check goal crossing. The label is taken at the first time $T$ for which at least one candidate is simultaneously scoring and reachable.
 
@@ -153,31 +153,34 @@ This brings the vehicle to a halt within a few simulation steps, ensuring it rem
 
 ## 5. Results
 
-The system was validated using a rigorous integration test suite over 50 randomized, distinct seeds (seeds 100–149), encompassing varied approach angles, multi-bounce ball trajectories, and challenging initial vehicle headings. Each seed generates a unique initial configuration by sampling ball and car states from the same distributions used in training.
+The system was validated using a rigorous integration test suite over **100** randomized, distinct seeds (default: seeds 100–199), encompassing varied approach angles, multi-bounce ball trajectories, and challenging initial vehicle headings. Each seed generates a unique initial configuration by sampling ball and car states from the same distributions used in training.
+
+**Success definition.** A run counts as successful only when the car strikes the ball *and* the ball enters the goal (`success = scored AND ball_struck`). Goals entered without car contact are logged but excluded.
+
+**Pass criterion.** Strike-gated success rate $\ge 60\%$ (`scripts/test_main.py`). The former closest-approach position threshold ($\le 0.35$ m) is no longer a pass gate.
 
 ### 5.1 Aggregate Performance
 
-Results are reported for the network-driven pipeline (latest batch `20260612_155705`):
+*Illustrative results from a 50-seed batch (`20260612_155705`) run before the default expanded to 100 seeds; regenerate on the latest batch for publication figures.*
 
-| Metric | Target | Achieved |
+| Metric | Target | Achieved (N=50 example) |
 |:---|:---|:---|
-| **Goal Success Rate** | ≥ 60% | **74%** (37/50) |
-| **Avg Strike Position Error** | ≤ 0.35 m | **0.334 m** (median 0.320 m) |
-| **Avg Strike Heading Error** | ≤ 0.25 rad | **0.070 rad** (median 0.000 rad) |
+| **Strike-gated Success Rate** | ≥ 60% | **74%** (37/50) |
+| **Mean `strike_point_pred_err_m`** | report only | *regenerate from latest batch* |
 | **Solver Convergence** | — | **48/50** runs with zero solver failures |
 
 The pursuit-based warm-start kept 48 of 50 runs entirely free of solver failures; only 2 runs triggered recoverable IPOPT restoration phases.
 
-**Network vs. fallback contribution.** In 26 of 50 episodes StrikeNet's predicted strike point and heading passed the scoring rollout and drove the controller directly (`target_source = "network"`), scoring 16/26 (61.5%). In the remaining 24 episodes the analytic fallback was engaged, scoring 21/24 (87.5%). The fallback's higher success rate is expected — it only engages when the predicted plan provably fails the rollout, and it then uses the exact analytic search — but the gap also confirms that the network's predicted strike *position* remains the primary accuracy bottleneck. This breakdown is produced automatically by `scripts/analyze_fallback.py`.
+**Network vs. fallback contribution (same example batch).** In 26 of 50 episodes StrikeNet's predicted strike point and heading passed the scoring rollout and drove the controller directly (`target_source = "network"`), scoring 16/26 (61.5%). In the remaining 24 episodes the analytic fallback was engaged, scoring 21/24 (87.5%). This breakdown is produced automatically by `scripts/analyze_fallback.py`.
 
-**Failure analysis.** The 13 failures are dominated by network-driven episodes (10 of 13) in which the predicted strike *position* was inaccurate: the controller drives to the predicted point, but the diagnostic `net_vs_analytic_pos_m` reveals the ball is elsewhere by more than the 0.35 m contact radius, so contact is missed or mistimed. A second, smaller failure mode is late/slow strikes whose post-strike ball flight was truncated by the simulation window; the post-strike window has been extended from 5.0 s to 8.0 s to mitigate this. Note that because the scoring rollout validates only the predicted *heading*-at-position and not the positional accuracy itself, a confidently-wrong position is still trusted — this is the principal accuracy ceiling of the current network-driven design.
+**Failure analysis.** Failures are dominated by network-driven episodes in which the predicted strike *position* was inaccurate: the controller drives to the predicted point, but `net_vs_analytic_pos_m` and `strike_point_pred_err_m` show the ball is elsewhere at contact time. Because the scoring rollout validates heading-at-position but not positional accuracy, a confidently-wrong position can still be trusted — the principal accuracy ceiling of the current design. A proposed fix (predict only $T$ and $\theta$, derive $x,y$ from ball physics) is documented in [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md) but not yet implemented.
 
 <!-- 📊 FIGURE 10: Integration summary bar chart — per-seed final position error and heading error
      side by side, with pass/fail annotation. See scripts/generate_plots.py → plot_integration_summary().
      This is the key results figure. -->
 
-<!-- 📊 FIGURE 11: Stacked/grouped bar chart showing the breakdown of 37 successes vs. 13 failures
-     across the 50 test seeds, split by target_source (network vs. fallback). This is produced by
+<!-- 📊 FIGURE 11: Stacked/grouped bar chart showing successes vs. failures
+     across the integration batch, split by target_source (network vs. fallback). This is produced by
      scripts/analyze_fallback.py (fallback_analysis.png), which also overlays per-source success
      rates and strike-error distributions. -->
 
@@ -202,7 +205,7 @@ The pursuit-based warm-start kept 48 of 50 runs entirely free of solver failures
 The average NMPC solve time is on the order of tens of milliseconds per step, within the 100 ms simulation timestep, confirming real-time feasibility. Suppressing IPOPT console output and CasADi I/O overhead yielded a large per-solve speedup; exact per-step solve times are recorded in each run's `trajectory.csv` (`solve_ms` column) and summarized by `scripts/analyze_results.py`.
 
 <!-- 📊 FIGURE 14: Solve time distribution plot. Either a histogram of solve times across all steps
-     from all 50 seeds, or a line plot showing solve time vs. step number (demonstrating that
+     from all seeds in the batch, or a line plot showing solve time vs. step number (demonstrating that
      solve time decreases as the horizon shrinks). -->
 
 ### 5.4 Computational Scalability and Amortisation
@@ -236,13 +239,13 @@ The fundamental motivation for learning a strike planner rather than computing o
 
 **Limitations.** The current system has several limitations: (1) the strike plan is predicted only once at $t = 0$ and executed open-loop for the full horizon, so any prediction error is locked in — the dominant failure mode is an inaccurate predicted strike *position* that the scoring rollout does not catch (it validates the heading-at-position, not the position itself); (2) the 36-candidate angular sweep used by the fallback is discretized at 10° resolution; (3) the ball physics model does not include drag, spin, or gravitational effects, limiting realism; (4) the neural network is trained on a fixed field geometry and goal configuration, reducing transferability; and (5) the system assumes perfect state observation with no sensor noise or latency.
 
-**Future Work.** Potential extensions include: (1) **closed-loop re-querying** — re-evaluating StrikeNet every control step with the current scene state so prediction error shrinks as the strike approaches (a receding-horizon analogue that directly targets the open-loop position-error ceiling), which requires adding car speed as a network input and randomizing initial speed during data generation to avoid distribution shift; (2) **structured outputs** — having the network predict only the decisions that require search ($T$ and $\theta$) and deriving the strike position from the predicted $T$ through the known ball dynamics, eliminating the position-regression error mode by construction; (3) treating the multimodal heading as a classification over angle bins (anchor-based prediction) rather than regression; (4) introducing observation noise and Kalman filtering for state estimation; and (5) transferring the learned policy to physical hardware using sim-to-real techniques.
+**Future Work.** Potential extensions include: (1) **physics-informed prediction** — predict only $(T, \theta)$ and derive $(x, y)$ from `propagate_ball_for_time` at runtime (detailed scope in [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md)); (2) **closed-loop re-querying** — re-evaluating StrikeNet every control step; (3) anchor-based heading classification for multimodal scenes; (4) observation noise and state estimation; and (5) sim-to-real transfer.
 
 ---
 
 ## 7. Conclusion
 
-This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture in which the learned strike plan drives the controller directly — with a physics-based scoring rollout providing a safety fallback — achieving 74% goal-scoring accuracy over 50 diverse randomized scenarios (the network's prediction driving execution in 52% of episodes); (2) a pursuit-based warm-start strategy that keeps 48/50 runs free of solver failures; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to a median of 0.000 rad (mean 0.070 rad); and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks, while the analysis identifies open-loop strike-position error as the primary accuracy ceiling and motivates closed-loop re-querying as the natural next step.
+This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture in which the learned strike plan drives the controller directly — with a physics-based scoring rollout providing a safety fallback — achieving strike-gated goal-scoring accuracy with a 60% pass threshold over 100 diverse randomized scenarios (example: 74% over 50 seeds in batch `20260612_155705`; network driving execution in 52% of those episodes); (2) a pursuit-based warm-start strategy that keeps 48/50 runs free of solver failures; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to a median of 0.000 rad (mean 0.070 rad); and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks, while the analysis identifies open-loop strike-position error as the primary accuracy ceiling and motivates closed-loop re-querying as the natural next step.
 
 ---
 

@@ -1,6 +1,8 @@
-# Project documentation
+# Project documentation (ARCHIVE)
 
-Read these in order if you are new to the codebase:
+**These files are frozen pre–Phase 5 snapshots.** For current behaviour (strike-gated success, 100-seed integration default, `src/planner.py`, headline `strike_point_pred_err_m` metrics), use the parent [`docs/`](../README.md) documents instead.
+
+Read these in order only for historical context:
 
 | Document | Contents |
 |----------|----------|

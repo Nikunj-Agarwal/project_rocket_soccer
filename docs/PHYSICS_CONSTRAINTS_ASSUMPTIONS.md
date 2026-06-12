@@ -70,9 +70,22 @@ The post-strike phase runs for up to 80 steps (8.0 s) but breaks immediately onc
 
 ---
 
+## 📐 Analytic Reachability Model (`src/planner.py`)
+
+Offline labels, the online analytic fallback, and scalability benchmarks all call `analytic_strike_plan()` in `src/planner.py`. Reachability at horizon $T$ uses:
+
+* **Linear reach** — `max_reach_distance(T)` with $a_{max}=2.0$ m/s² and $v_{max}=2.0$ m/s (same defaults as `InterceptionMPC`):
+  * $d_{max} = T^2$ for $T \le 1.0$ s (accel phase only)
+  * $d_{max} = 2T - 1$ for $T > 1.0$ s (accel then cruise)
+* **Turn penalty** — effective path length $d_{effective} = d_{straight} + R_{turn}(\Delta\theta_{start} + \Delta\theta_{end})$
+  * Exact min turn radius: $R_{turn} = L/\tan(\delta_{max}) = 0.30$ m
+  * **Current default:** $R_{turn} = 0.35$ m (`_R_TURN_LEGACY`) — preserves existing dataset labels; switching to $0.30$ m requires regen + retrain (see [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md))
+
+---
+
 ## 📊 Dataset & Generation Constraints
 
-The generator (`src/data_generator.py`) generates reachable scoring scenarios:
+The generator (`src/data_generator.py`) calls `analytic_strike_plan()` to produce reachable scoring scenarios:
 * **Ball Sampling**: Position $x_b \in [2.0, 8.0]$, $y_b \in [0.0, 6.0]$, speed $v_b \in [0.5, 2.0]$ m/s.
 * **Car Sampling**: Position $x_c \in [0.0, 4.0]$, $y_c \in [0.0, 6.0]$, heading $\theta_c \in [-\pi, \pi]$, speed $v_c = 0.0$.
 * **Scoring Heading Verification**: At each candidate time $T \in [0.5, 5.0]$ s, the generator sweeps 36 angular candidates $\theta_{strike} \in [-\pi, \pi]$ and collects every heading that both deflects the ball into the goal **and** is kinodynamically reachable at $T$. The label is taken at the first $T$ with at least one feasible heading; among those, the canonical heading is the one closest to the line-of-sight from the strike point to the goal center. If no feasible heading exists at any $T$, the sample is rejected.
@@ -81,13 +94,18 @@ The generator (`src/data_generator.py`) generates reachable scoring scenarios:
 
 ## 🏁 Integration Test Success Criteria
 
-Evaluated in `scripts/test_main.py` over 50 distinct seeds (default batch: seeds 100–149):
+Evaluated in `scripts/test_main.py` over **100** distinct seeds (default: seeds 100–199):
 
-| Metric | Threshold | Latest run (batch `20260612_155705`) |
-| :--- | :--- | :--- |
-| **Scored Goal Rate** | $\ge 60\%$ (at least 30 successes) | **74%** (37/50) — PASS |
-| **Avg Strike Position Error** | $\le 0.35$ m (at closest approach) | **0.334 m** mean / 0.320 m median — PASS |
-| **Avg Strike Heading Error** | $\le 0.25$ rad (at closest approach) | **0.070 rad** mean / 0.000 rad median — PASS |
-| **Solver Convergence** | Recoverable IPOPT failures rare | 48/50 runs with zero solver failures |
+| Criterion | Threshold |
+| :--- | :--- |
+| **Strike-gated success rate** | $\ge 60\%$ — `success = scored AND ball_struck` (ungated goals excluded) |
 
-Of the 37 goals, 16 came from episodes where StrikeNet's predicted strike point/heading was used directly (`target_source = "network"`, 26/50 episodes, 61.5% success) and 21 from the analytic fallback (24/50 episodes, 87.5% success). The fallback's higher success rate confirms the network's strike-*position* prediction remains the main accuracy bottleneck; see `scripts/analyze_fallback.py` for the full breakdown.
+The old closest-approach position threshold ($\le 0.35$ m) is **not** a pass gate — contact triggers at `CONTACT_RADIUS = 0.35` m, so that metric is tautological when a strike occurs.
+
+**Headline reported metrics** (logged per seed, summarized in `batch.log`):
+* `strike_point_pred_err_m` — predicted target vs ball-at-contact
+* `strike_time_err_s` — timing error vs predicted horizon
+
+**Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`.
+
+*Example (50-seed batch `20260612_155705`, pre-100-seed default):* 74% strike-gated success (37/50), network path 16/26 (61.5%), fallback 21/24 (87.5%). Regenerate figures on a current 100-seed batch after `python scripts/test_main.py`.

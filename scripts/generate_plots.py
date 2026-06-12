@@ -54,6 +54,13 @@ FIELD_W = DEFAULT_FIELD_W
 FIELD_H = DEFAULT_FIELD_H
 
 
+def _strike_gated_success(meta: dict) -> bool:
+    """Success = ball entered goal AND car struck the ball (matches main.py / test_main.py)."""
+    scored = bool(meta.get("scored", meta.get("success", False)))
+    ball_struck = bool(meta.get("ball_struck", False))
+    return scored and ball_struck
+
+
 def _draw_field(ax, title: str = "") -> None:
     ax.set_xlim(-0.3, FIELD_W + 0.3)
     ax.set_ylim(-0.3, FIELD_H + 0.3)
@@ -148,9 +155,9 @@ def plot_integration_summary(
         if meta_path.is_file():
             with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
-            successes.append(bool(meta.get("success", False)))
+            successes.append(_strike_gated_success(meta))
         else:
-            successes.append(final_pos[-1] <= 0.2 and final_head[-1] <= 0.15)
+            successes.append(False)
 
     if not seeds:
         return None
@@ -158,14 +165,12 @@ def plot_integration_summary(
     x = np.arange(len(seeds))
     width = 0.35
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(x - width / 2, final_pos, width, label="Final pos err (m)", color="#1565c0")
-    ax.bar(x + width / 2, final_head, width, label="Final heading err (rad)", color="#e65100")
-    ax.axhline(0.2, color="#1565c0", ls="--", lw=1, alpha=0.6)
-    ax.axhline(0.15, color="#e65100", ls="--", lw=1, alpha=0.6)
+    ax.bar(x - width / 2, final_pos, width, label="Contact dist (m) [diag]", color="#1565c0")
+    ax.bar(x + width / 2, final_head, width, label="Heading err (rad) [diag]", color="#e65100")
     ax.set_xticks(x)
     ax.set_xticklabels([f"{s}\n({'OK' if ok else 'X'})" for s, ok in zip(seeds, successes)], fontsize=8)
-    ax.set_xlabel("Seed")
-    ax.set_title(f"Integration Batch {batch_id} — Final Errors per Seed")
+    ax.set_xlabel("Seed  (OK = strike-gated goal)")
+    ax.set_title(f"Integration Batch {batch_id} — Contact Errors per Seed")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
@@ -277,7 +282,7 @@ def plot_global_batch_progress(out_dir: Path) -> str | None:
             if meta_path.is_file():
                 with open(meta_path, encoding="utf-8") as f:
                     meta = json.load(f)
-                if meta.get("success", False):
+                if _strike_gated_success(meta):
                     successes += 1
                     
         if len(seed_runs) > 0 and len(pos_errs) > 0:

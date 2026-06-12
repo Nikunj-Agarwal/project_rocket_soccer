@@ -104,15 +104,21 @@ python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 | `ball_x`, `ball_y` | float | Coordinates of the ball center. |
 | `u_acc` | float | Input acceleration command. |
 | `u_steer` | float | Input steering angle command. |
-| `pos_err` | float | Distance between the car center and the ball center. The minimum value during the `approach` phase is used as the strike position error. |
-| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). The value at the step of minimum `pos_err` is used as the strike heading error. |
+| `pos_err` | float | Distance between the car center and the ball center. **Diagnostic only** — minimum during `approach` is closest-approach distance (tautologically $< 0.35$ m when contact occurs). |
+| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). **Diagnostic only** — value at minimum-`pos_err` step. |
 | `solve_ms` | float | Execution time of NMPC solver in milliseconds. |
 
 ### 2. `metadata.json` Fields
 
-* `success` (bool): `True` if `scored` is `True` and `on_field` is `True`.
-* `final_pos_err_m` (float): Final position error at simulation termination.
-* `final_heading_err_rad` (float): Final heading error at simulation termination.
+* `success` (bool): **Strike-gated research metric** — `True` if `scored AND ball_struck`. Goals entered without car contact are excluded.
+* `scored` (bool): Raw physics flag — ball segment crossed the goal mouth.
+* `ball_struck` (bool): Raw physics flag — car–ball contact occurred (`dist < 0.35` m).
+* `strike_point_pred_err_m` (float): Headline accuracy — $\|\text{strike\_target}_{xy} - \text{ball\_at\_contact}\|$. `NaN` if no contact.
+* `strike_time_err_s` (float): Headline timing error — $|\text{strike\_step} - N_{steps}| \cdot \Delta t$. `NaN` if no contact.
+* `ball_at_strike` (list or null): `[x, y]` ball position at contact; `null` if no strike.
+* `contact_pos_err_m` (float): **Diagnostic** — closest-approach distance at end of approach (alias of legacy `final_pos_err_m`).
+* `final_pos_err_m` (float): **Diagnostic** — same as `contact_pos_err_m` (kept for backward compatibility).
+* `final_heading_err_rad` (float): **Diagnostic** — heading error at closest approach.
 * `solver_failures` (int): Number of steps NMPC failed to converge.
 * `N_steps` (int): Interception horizon steps.
 * `T_final_s` (float): Predicted interception time.
@@ -120,10 +126,8 @@ python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 * `field_size_m` (list of float): `[W, H]`.
 * `strike_target` (list of float): `[x_target, y_target, theta_target]` — the chosen strike point and heading (from StrikeNet when `target_source == "network"`, else from the analytic fallback).
 * `target_source` (str): `"network"` if StrikeNet's predicted strike point/heading passed the scoring rollout and was used directly, or `"fallback"` if the analytic strike point + heading sweep was substituted.
-* `net_vs_analytic_pos_m` (float): Distance between StrikeNet's predicted strike position and the analytically propagated ball position at `T_final`. A diagnostic for how accurate the network's spatial prediction was (larger values correlate with network-driven misses).
-* `scored` (bool): `True` if ball crossed the goal line.
-* `ball_struck` (bool): `True` if collision occurred.
-* `strike_step` (int): The step index where collision occurred.
+* `net_vs_analytic_pos_m` (float): Distance between StrikeNet's predicted strike position and the analytically propagated ball position at `T_final`. Diagnostic for network spatial prediction quality.
+* `strike_step` (int): The step index where collision occurred (`null`/absent if no strike).
 * `strikenet_infer_ms` (float): Median StrikeNet inference latency on CPU over `timing_repeats` warm-up-discarded repetitions (online decision-layer cost).
 * `analytic_strategy_ms` (float): Median latency of the equivalent analytic strike search on the same scene (timed for comparison only; does not drive control).
 * `speedup_factor` (float): `analytic_strategy_ms / strikenet_infer_ms` — the per-decision amortization factor.

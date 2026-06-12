@@ -1,9 +1,14 @@
 # Future Work: Physics-Informed (Structured) Strike Prediction
 
-Status: proposed, not yet implemented.
+Status: **proposed, not yet implemented.** The current runtime has a single hybrid mode
+(network prediction + scoring-guard fallback); there are no selectable analytic-only,
+network-only, or pure-network-without-fallback modes at runtime.
+
 Owner: TBD.
-Depends on: a dataset regeneration + StrikeNet retrain (so it pairs naturally with
-the "exact `R_min`" change deferred from Issue 3 of the evaluation-validity fixes).
+
+Depends on: a dataset regeneration + StrikeNet retrain (pairs naturally with switching
+`R_turn` from the legacy 0.35 m default to the exact $L/\tan(\delta_{max}) = 0.30$ m
+in `src/planner.py`).
 
 ---
 

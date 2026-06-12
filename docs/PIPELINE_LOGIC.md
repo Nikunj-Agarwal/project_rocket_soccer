@@ -15,6 +15,9 @@ flowchart TD
 ```
 
 ### 1. Data Generation (`python -m src.data_generator`)
+
+Label search is implemented in `src/planner.py` as `analytic_strike_plan()` (also called by `main.py` for fallback timing and `benchmark_scalability.py`). Reachability uses `max_reach_distance(T)` with car constants matching NMPC ($a_{max}=2.0$ m/s², $v_{max}=2.0$ m/s) and a turn-arc penalty with $R_{turn}=0.35$ m (legacy default; exact value $L/\tan(\delta_{max})=0.30$ m is deferred to a future dataset regen — see [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md)).
+
 For each sample scene:
 1. Initialize random ball and car parameters.
 2. For increasing $T \in [0.5, 5.0]$ s (in steps of $0.05$ s):
@@ -47,7 +50,8 @@ $$\mathbf{y}_{train} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}
    - Clip the predicted $(x_{strike}, y_{strike})$ to the field.
    - Run a scoring rollout: does striking at the predicted point with the predicted heading $\theta_{strike}$ send the ball into the goal?
    - **If yes** (`target_source = "network"`): use the network's $(x_{strike}, y_{strike}, \theta_{strike})$ directly.
-   - **If no** (`target_source = "fallback"`): substitute the analytic strike point $\mathbf{p}_{analytic}$ and sweep 36 headings, picking the scoring heading closest to the goal line-of-sight (same canonical rule as the dataset labels; if none score, fall back to the goal LoS heading). This is a *correctness guard*, not a silent override — it only engages when the learned plan provably cannot score.
+   - **If no** (`target_source = "fallback"`): substitute the ball position $\mathbf{p}_{analytic}$ propagated to the network's $T_{final}$ (not a full min-$T$ replan from `analytic_strike_plan`) and sweep 36 headings, picking the scoring heading closest to the goal line-of-sight (same canonical rule as dataset labels / `src/planner.py`; if none score, fall back to the goal LoS heading). This is a *correctness guard*, not a silent override.
+   - **Latency note:** `analytic_strike_plan()` from `src/planner.py` is timed in parallel for benchmarking (`analytic_strategy_ms`) but does not select the runtime fallback target.
 5. **Offset Target**: Apply $d_{offset} = 0.32$ m behind the chosen strike point:
    $$\mathbf{q}_{strike} = \left[ x_{tgt} - d_{offset}\cos(\theta_{tgt}),\ y_{tgt} - d_{offset}\sin(\theta_{tgt}),\ \theta_{tgt},\ v_{impact} \right]$$
 6. **NMPC Loop**: For $k = 0 \rightarrow N_{steps} - 1$:
@@ -106,7 +110,14 @@ sequenceDiagram
 ## 🧪 Testing & Reporting Pipelines
 
 ### Integration Tests (`scripts/test_main.py`)
-Runs 50 predefined seeds (default: seeds 100–149). Evaluates strike position and heading errors at the moment of **closest approach** (minimum `pos_err`) during the approach phase. Checks if the ball successfully scores, and checks that both vehicle and ball end up within the field bounds.
+Runs **100** predefined seeds (default: seeds 100–199), six concurrent subprocess workers. **Pass criterion:** strike-gated success rate $\ge 60\%$ (`success = scored AND ball_struck` in `metadata.json`; unstruck goals are logged but excluded).
+
+**Headline accuracy metrics** (written by `main.py` into `metadata.json`):
+* `strike_point_pred_err_m` — $\|\text{predicted target} - \text{ball at contact}\|$
+* `strike_time_err_s` — $|\text{actual strike step} - N_{steps}| \cdot \Delta t$
+* `ball_at_strike` — ball position at contact (null if no strike)
+
+**Diagnostic only:** closest-approach `pos_err` / `heading_err` in `trajectory.csv`, and `contact_pos_err_m` / `final_pos_err_m` in metadata (always below `CONTACT_RADIUS = 0.35` m when contact occurs; not used for pass/fail).
 
 ### Plot Generation (`scripts/generate_plots.py`)
 Generates loss curves, model validation error plots, and per-seed trajectory plots. All results are written to a structured folder under `data/reports/plots/integration/{batch_id}/` where batch ID represents the timestamp of the integration test.

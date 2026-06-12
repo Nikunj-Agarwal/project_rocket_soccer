@@ -81,9 +81,9 @@ step "STEP 3/6 — Network sanity check"
 python scripts/test_network.py
 
 # ----------------------------------------------------------------------------
-# STEP 4 — Integration test (50 seeds) — the main evaluation
+# STEP 4 — Integration test (100 seeds, 100-199) — the main evaluation
 # ----------------------------------------------------------------------------
-step "STEP 4/6 — Integration test (50 seeds)"
+step "STEP 4/6 — Integration test (100 seeds)"
 python scripts/test_main.py $NO_VIDEO
 
 # ----------------------------------------------------------------------------

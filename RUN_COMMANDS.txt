@@ -53,11 +53,13 @@ python scripts/test_network.py
     under ~0.5 rad on most samples
 
 ---------------------------------------------------------------------
- STEP 4 — Integration test, 50 seeds (the main evaluation)
+ STEP 4 — Integration test, 100 seeds (the main evaluation)
 ---------------------------------------------------------------------
 python scripts/test_main.py
 
   - Runs seeds 100-199 (100 seeds), each in a subprocess, 6 at a time
+  - Pass criterion: >= 60% strike-gated success (scored AND ball_struck)
+  - Headline accuracy metric: strike_point_pred_err_m in metadata.json
   - Saves per-seed video + trajectory + metadata under
     data/tests/integration/{batch_id}/seed_{N}/
   - Faster run without videos:

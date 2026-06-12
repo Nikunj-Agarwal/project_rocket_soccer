@@ -297,34 +297,35 @@ def plot_control_profiles(trajectories, output_dir: Path):
 def plot_error_distributions(df_runs, output_dir: Path):
     """
     3. Interception Error Distributions:
-    Histograms + KDE plots representing Strike Position Error and Strike Heading Error,
-    overlaid with their physical pass criteria thresholds.
+    Headline metric: strike_point_pred_err_m (predicted target vs ball at contact).
+    Diagnostic: contact distance (closest car–ball approach; tautological when strike occurs).
     """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Strike Position Error
-    pos_errs = df_runs["final_pos_err"]
-    axes[0].hist(pos_errs, bins=15, color="#1abc9c", alpha=0.7, edgecolor="black", density=False)
-    axes[0].axvline(0.35, color="#e74c3c", linestyle="--", linewidth=2, label="Threshold (<= 0.35m)")
-    
-    # Annotate mean
-    mean_val = pos_errs.mean()
-    axes[0].axvline(mean_val, color="#2c3e50", linestyle="-.", linewidth=1.5, label=f"Mean ({mean_val:.4f}m)")
-    axes[0].set_title("Strike Position Error Distribution", fontsize=12, fontweight="bold")
-    axes[0].set_xlabel("Interception Distance Error (meters)")
+    # Headline: predicted strike target vs ball position at contact
+    pred_errs = df_runs["strike_point_pred_err_m"].dropna()
+    if len(pred_errs) > 0:
+        axes[0].hist(pred_errs, bins=15, color="#1abc9c", alpha=0.7, edgecolor="black", density=False)
+        mean_val = pred_errs.mean()
+        axes[0].axvline(mean_val, color="#2c3e50", linestyle="-.", linewidth=1.5, label=f"Mean ({mean_val:.4f} m)")
+        axes[0].set_title("Strike Pred Target Error Distribution", fontsize=12, fontweight="bold")
+        axes[0].set_xlabel("||predicted target − ball at contact|| (m)")
+    else:
+        axes[0].text(0.5, 0.5, "No strike_point_pred_err_m data\n(re-run integration test)",
+                     ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].set_title("Strike Pred Target Error Distribution", fontsize=12, fontweight="bold")
     axes[0].set_ylabel("Frequency (Runs)")
     axes[0].grid(True, linestyle="--", alpha=0.3)
     axes[0].legend()
 
-    # Strike Heading Error
-    hd_errs = df_runs["final_heading_err"]
-    axes[1].hist(hd_errs, bins=15, color="#f1c40f", alpha=0.7, edgecolor="black", density=False)
-    axes[1].axvline(0.25, color="#e74c3c", linestyle="--", linewidth=2, label="Threshold (<= 0.25 rad)")
-    
-    mean_hd = hd_errs.mean()
-    axes[1].axvline(mean_hd, color="#2c3e50", linestyle="-.", linewidth=1.5, label=f"Mean ({mean_hd:.4f} rad)")
-    axes[1].set_title("Strike Heading Error Distribution", fontsize=12, fontweight="bold")
-    axes[1].set_xlabel("Interception Heading Error (radians)")
+    # Diagnostic: closest-approach contact distance (not a pass criterion)
+    contact_errs = df_runs["final_pos_err"]
+    axes[1].hist(contact_errs, bins=15, color="#f1c40f", alpha=0.7, edgecolor="black", density=False)
+    mean_contact = contact_errs.mean()
+    axes[1].axvline(mean_contact, color="#2c3e50", linestyle="-.", linewidth=1.5,
+                    label=f"Mean ({mean_contact:.4f} m)")
+    axes[1].set_title("Contact Distance [diagnostic]", fontsize=12, fontweight="bold")
+    axes[1].set_xlabel("Closest car–ball distance (m)")
     axes[1].set_ylabel("Frequency (Runs)")
     axes[1].grid(True, linestyle="--", alpha=0.3)
     axes[1].legend()
@@ -823,8 +824,10 @@ def main():
 
     # Print a beautiful ASCII summary
     success_rate = (df_runs["success"].sum() / len(df_runs)) * 100
-    avg_pos_err = df_runs["final_pos_err"].mean()
-    avg_hd_err = df_runs["final_heading_err"].mean()
+    unstruck = int(df_runs["unstruck_goal"].sum()) if "unstruck_goal" in df_runs.columns else 0
+    pred_errs = df_runs["strike_point_pred_err_m"].dropna()
+    avg_pred_err = pred_errs.mean() if len(pred_errs) > 0 else float("nan")
+    avg_contact = df_runs["final_pos_err"].mean()
     avg_solver_fails = df_runs["solver_failures"].mean()
     
     print("\n" + "=" * 60)
@@ -832,9 +835,11 @@ def main():
     print("=" * 60)
     print(f"  Batch Analyzed       : {batch_id}")
     print(f"  Total Runs Processed : {len(df_runs)}")
-    print(f"  Goal Success Rate    : {success_rate:.1f}%")
-    print(f"  Average Pos Error    : {avg_pos_err:.4f} m (Pass Threshold: <= 0.35)")
-    print(f"  Average Heading Error: {avg_hd_err:.4f} rad (Pass Threshold: <= 0.25)")
+    print(f"  Goal Success Rate    : {success_rate:.1f}% (strike-gated)")
+    print(f"  Unstruck goals (excl): {unstruck}")
+    pred_str = f"{avg_pred_err:.4f} m" if not np.isnan(avg_pred_err) else "n/a"
+    print(f"  Avg Pred Target Err  : {pred_str}")
+    print(f"  Avg Contact Dist     : {avg_contact:.4f} m (diagnostic)")
     print(f"  Avg Solver Failures  : {avg_solver_fails:.2f} per run")
     print("-" * 60)
     print(f"  All diagnostic plots saved to: {output_dir.relative_to(PROJECT_ROOT)}")

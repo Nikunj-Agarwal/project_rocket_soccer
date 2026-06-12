@@ -41,11 +41,13 @@ plan, and an analytic interception point with a heading sweep is
 substituted only when the learned plan provably cannot score. By
 incorporating elastic collision models, target-offset heuristics,
 pursuit-based warm-starting, and post-strike active braking, the
-system overcomes real-time kinodynamic constraints. Integration tests
-over 50 randomized scenarios demonstrate a 74\% goal-scoring success
-rate (with the network's prediction driving the controller end-to-end
-in 52\% of episodes), an average strike position error of 0.334\,m, and
-an average heading error of 0.070\,rad.
+system overcomes real-time kinodynamic constraints. Integration tests (default: 100 seeds, 100--199) use
+strike-gated success (\texttt{scored AND ball\_struck}). In a
+representative 50-seed run (batch \texttt{20260612\_155705}), the system
+achieved 74\% success with the network driving execution in 52\% of
+episodes; headline interception accuracy is
+\texttt{strike\_point\_pred\_err\_m} (predicted target vs.\ ball at
+contact).
 \end{abstract}
 
 %% ====================================================================
@@ -83,13 +85,13 @@ strength.
 
 This paper proposes such a two-phase hybrid approach: a Multi-Layer
 Perceptron (StrikeNet) dictates the macroscopic strategy (predicting
-the optimal interception time and strike heading from an initial scene
-configuration), while a shrinking-horizon NMPC solver manages the
-microscopic execution (computing a kinematically feasible control
-sequence that drives the vehicle to the predicted strike point). We
-validate the system over 50 randomized integration test seeds spanning
-diverse approach angles, multi-bounce trajectories, and challenging
-initial headings.
+the interception time, strike position, and strike heading from an
+initial scene configuration), while a shrinking-horizon NMPC solver
+manages microscopic execution. At runtime there is a single hybrid mode
+(network prediction with scoring-guard analytic fallback;
+\texttt{target\_source} logged per episode). We validate over 100
+randomized integration test seeds (default: 100--199) spanning diverse
+approach angles, multi-bounce trajectories, and challenging headings.
 
 %% ====================================================================
 %%  2. RELATED WORK
@@ -481,39 +483,33 @@ strike leaves the ball still travelling toward the goal.
 \section{Results}
 
 The system was validated using a rigorous integration test suite over
-50 randomized, distinct seeds (seeds 100--149), encompassing varied
-approach angles, multi-bounce ball trajectories, and challenging
-initial vehicle headings. Each seed generates a unique initial
-configuration by sampling ball and car states from the same
-distributions used in training.
+\textbf{100} randomized, distinct seeds (default: seeds 100--199).
+Success requires both car--ball contact and a goal
+(\texttt{success = scored AND ball\_struck}). The pass criterion is
+strike-gated success rate $\geq 60\%$; the former closest-approach
+position threshold is no longer a pass gate.
 
 \subsection{Aggregate Performance}
 
 \begin{table}[H]
 \centering
-\caption{Primary Integration Test Results ($N = 50$ seeds)}
+\caption{Primary Integration Test Results (illustrative $N = 50$ batch \texttt{20260612\_155705}; default suite is 100 seeds)}
 \label{tab:results}
 \begin{tabular}{@{}lcc@{}}
 \toprule
 \textbf{Metric} & \textbf{Target} & \textbf{Achieved} \\ \midrule
-Goal Success Rate & $\geq 60\%$ & \textbf{74\%} (37/50) \\
-Avg Strike Pos.\ Error & $\leq 0.35$\,m & \textbf{0.334\,m} (median 0.320) \\
-Avg Strike Heading Error & $\leq 0.25$\,rad & \textbf{0.070\,rad} (median 0.000) \\
+Strike-gated Success Rate & $\geq 60\%$ & \textbf{74\%} (37/50) \\
+Mean \texttt{strike\_point\_pred\_err\_m} & report & \textit{regenerate} \\
 Solver Convergence & --- & \textbf{48/50} runs failure-free \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 The pursuit-based warm-start kept 48 of 50 runs entirely free of solver
-failures; only 2 runs triggered recoverable IPOPT restoration phases. In
-26 of 50 episodes StrikeNet's predicted strike point and heading passed
-the scoring rollout and drove the controller directly
-(\texttt{target\_source = network}), scoring 16/26 (61.5\%); in the
-remaining 24 episodes the analytic fallback was engaged, scoring 21/24
-(87.5\%). The fallback only engages when the learned plan provably fails
-the rollout and then uses the exact analytic search, so its higher rate
-is expected; the gap confirms the network's strike-position prediction
-remains the principal accuracy bottleneck.
+failures. In 26 of 50 episodes StrikeNet's plan passed the scoring
+rollout (\texttt{target\_source = network}), scoring 16/26 (61.5\%);
+in 24 fallback episodes, 21 scored (87.5\%). Regenerate this table on
+the latest 100-seed batch via \texttt{scripts/analyze\_fallback.py}.
 
 \subsection{Detailed Descriptive Statistics}
 
@@ -521,17 +517,14 @@ Table~\ref{tab:descriptive} provides comprehensive descriptive
 statistics for all key performance metrics, including 95\% confidence
 intervals computed over the 50-seed population.
 
-\textit{Note: the detailed statistics in Table~\ref{tab:descriptive},
-the correlation matrix in Table~\ref{tab:correlation}, and the
-batch-specific figures below were produced by
-\texttt{scripts/analyze\_results.py} on an earlier batch and are
-retained as a template. They should be regenerated on the current
-network-driven batch (\texttt{20260612\_050403}) to match the headline
-results in Table~\ref{tab:results}.}
+\textit{Note: Tables~\ref{tab:descriptive}--\ref{tab:correlation} and
+batch-specific figures below are templates from earlier 50-seed batches.
+Regenerate via \texttt{scripts/analyze\_results.py --batch <id>} on the
+latest 100-seed integration run.}
 
 \begin{table*}[t]
 \centering
-\caption{System Descriptive Statistics and Control Effort Summary ($N = 50$, seeds 100--149, 95\% CI with $\alpha = 0.05$). \textnormal{Values from a prior batch; regenerate via \texttt{analyze\_results.py} on the latest batch.}}
+\caption{System Descriptive Statistics and Control Effort Summary (template from a prior 50-seed batch; regenerate on latest 100-seed batch).}
 \label{tab:descriptive}
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
@@ -636,7 +629,7 @@ predicted strike \emph{position} was inaccurate:
 \begin{figure}[H]
     \centering
     \includegraphics[width=\linewidth]{../data/reports/plots/integration/20260530_211038/solver_performance.png}
-    \caption{NMPC solver performance metrics across all 50 seeds,
+    \caption{NMPC solver performance metrics across the integration batch,
     showing the distribution of solve times and confirming real-time
     feasibility.}
     \label{fig:solver_perf}
@@ -722,7 +715,7 @@ offline cost that is amortised across all subsequent online deployments.
     \centering
     \includegraphics[width=\linewidth]{../data/reports/plots/integration/20260530_211038/error_distributions.png}
     \caption{Distribution of strike position errors and heading errors
-    across all 50 seeds, confirming that the majority of runs achieve
+    across the integration batch, confirming that the majority of runs achieve
     low-error interceptions.}
     \label{fig:error_dist}
 \end{figure}
@@ -775,7 +768,7 @@ turning room.
     \centering
     \includegraphics[width=\linewidth]{../data/reports/plots/integration/20260530_211038/phase_portrait.png}
     \caption{Phase portrait of the NMPC-controlled vehicle across all
-    50 seeds, showing the velocity-heading state-space trajectories.}
+    integration seeds, showing the velocity-heading state-space trajectories.}
     \label{fig:phase_portrait}
 \end{figure}
 
@@ -783,7 +776,7 @@ turning room.
     \centering
     \includegraphics[width=\linewidth]{../data/reports/plots/integration/20260530_211038/interception_heatmap.png}
     \caption{Interception heatmap showing the spatial distribution of
-    car-ball contact points across all 50 seeds on the
+    car-ball contact points across the integration batch on the
     10\,m~$\times$~6\,m field.}
     \label{fig:interception_heatmap}
 \end{figure}
@@ -853,13 +846,12 @@ dynamic interception into a machine learning strategy layer and an
 analytical NMPC execution layer provides a robust, real-time solution
 for autonomous soccer striking. The key contributions are:
 \begin{enumerate}
-    \item A hybrid StrikeNet + NMPC architecture in which the learned
-      strike plan drives the controller directly---with a physics-based
-      scoring rollout providing a safety fallback---achieving 74\%
-      goal-scoring accuracy over 50 diverse randomized scenarios (the
-      network driving execution in 52\% of episodes).
-    \item A pursuit-based warm-start strategy that keeps 48/50 runs
-      free of solver failures.
+    \item A hybrid StrikeNet + NMPC architecture (single runtime mode;
+      \texttt{target\_source} logged per episode) with strike-gated
+      success ($\geq 60\%$ pass threshold over 100 default seeds;
+      example: 74\% over 50 seeds in batch \texttt{20260612\_155705}).
+    \item A pursuit-based warm-start strategy that keeps solver failures
+      rare (48/50 failure-free in the example batch).
     \item A target-offset heuristic that reduces heading error at
       contact from 0.61\,rad to a median of 0\,rad (mean 0.070\,rad).
     \item An integration of elastic collision physics with active

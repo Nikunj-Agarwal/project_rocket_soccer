@@ -9,7 +9,7 @@ A **robot soccer striker** must intercept a **moving, bouncing ball** on a recta
 
 The system consists of two major components:
 1. **Offline Pipeline (Imitation Learning)**: Collects reachability and scoring data, trains a multi-layer perceptron (StrikeNet) to predict *when, where, and at what heading* to meet the ball.
-2. **Online Simulation Loop**: Queries StrikeNet for the full strike plan $(T, x, y, \theta)$, **uses that plan directly** to build the NMPC target (validated by a scoring rollout, with an analytic fallback only when the predicted plan cannot score), applies a backward target offset, and runs a shrinking-horizon NMPC loop.
+2. **Online Simulation Loop** (single hybrid mode — there is no runtime switch for analytic-only or network-only): Queries StrikeNet for the full strike plan $(T, x, y, \theta)$, validates it with a scoring rollout, and uses the prediction directly when it scores (`target_source = "network"`). When the predicted plan cannot score, an inline analytic fallback propagates the ball to the network's horizon $T$, sweeps 36 headings with the same canonical goal-LoS rule as the dataset labels (`target_source = "fallback"`). `src/planner.py` is used offline for labels and timed at runtime for latency comparison only — it does not drive control. The chosen target receives a backward offset, then a shrinking-horizon NMPC loop executes interception and post-strike braking. Episode success requires both a car–ball strike and a goal (`success = scored AND ball_struck`).
 
 ```mermaid
 flowchart LR
@@ -39,6 +39,7 @@ flowchart LR
 | Layer | Module | Role |
 | :--- | :--- | :--- |
 | **Strategy** | `src/network.py` — **StrikeNet** | MLP that maps 7-D scene state $\rightarrow$ `[T_strike, x_strike, y_strike, sin(θ), cos(θ)]`. |
+| **Analytic planner** | `src/planner.py` — **`analytic_strike_plan`** | Shared min-$T$ search with reachability check (`max_reach_distance`) and canonical heading selection; used offline in `data_generator`, as the online fallback, and for latency benchmarks. |
 | **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon MPC using CasADi/IPOPT with pursuit-based warm-start to solve kinematic bicycle inputs. |
 | **Simulation** | `src/simulator.py` — **World** | Updates car (RK4 integration) and ball (wall bounce and bumper collision). |
 | **Physics** | `src/ball_physics.py` | Implements shared wall-bounce physics and car-ball elastic collision dynamics. |

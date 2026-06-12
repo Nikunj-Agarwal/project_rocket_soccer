@@ -59,7 +59,7 @@ RoboCup research offers specific literature on intercepting high-speed bouncing 
 * **Authors:** Research teams from Tech United Eindhoven (TU Eindhoven) or ASML Falcons
 * **Venue:** RoboCup Symposium Proceedings
 * **Core Concept:** Details path planning algorithms for wheeled robots to intercept balls in high-speed, dynamic soccer environments. Discusses dynamic "Estimated Time of Arrival" (ETA) calculations and how to compute the precise interception point along a predicted ball trajectory.
-* **Linkage to StrikeNet:** Directly validates your dataset generation logic, where you sweep $\theta_{strike}$ candidates and run kinodynamic bi-arc path approximations to check vehicle reachability.
+* **Linkage to StrikeNet:** Directly validates the dataset generation logic in `src/planner.py` (`analytic_strike_plan`), where the generator sweeps $\theta_{strike}$ candidates and uses `max_reach_distance` plus a turn-arc penalty to check vehicle reachability.
 
 #### Reference 7: Dynamic Object Catching and Interception with Coordinated Manipulators using NMPC
 * **Authors:** Research from ETH Zürich (ADRL Lab)
