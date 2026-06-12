@@ -147,3 +147,7 @@ Reference comparison `20260613_025809` (seeds 100–199):
 **Reporting rule:** lead with strike-gated success and deployed latency; treat low structured position error as expected tautology, not a headline win.
 
 ---
+
+## 7. Future work (planner / dataset alignment)
+
+**Goal pass-through in pre-strike search (P4-Option-B):** Pass `goal` into `propagate_ball_step` during the $T$-grid search in `analytic_strike_plan()` so planner ball propagation matches the simulator (goal mouth pass-through vs right-wall bounce). This changes accepted labels for goal-bound scenes → requires full `strike_dataset.npy` regen, retrain both StrikeNet variants, and re-run the 8-step eval pipeline. Documented as a known edge case in [PHYSICS_CONSTRAINTS_ASSUMPTIONS.md](PHYSICS_CONSTRAINTS_ASSUMPTIONS.md); unstruck goals remain excluded from success today.

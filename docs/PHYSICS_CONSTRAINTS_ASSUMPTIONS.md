@@ -87,6 +87,18 @@ Offline labels, the online analytic fallback, and scalability benchmarks all cal
 
 ---
 
+## Modeling Assumptions and Limitations
+
+These are deliberate simplifications. They are consistent across training, planning, and simulation, but a reviewer should treat them as stated assumptions rather than hidden guarantees.
+
+1. **Bumper normal = car heading** — `compute_strike_velocity` treats the strike direction as the car heading $\mathbf{n}=[\cos\theta,\sin\theta]^T$, regardless of where on the bumper contact occurs. Strike angle is effectively a control input, not an outcome of rigid-body contact geometry.
+2. **Reachability is heuristic** — the analytic planner uses a Dubins-style turn-arc penalty with $R_{turn}=0.35$ m (legacy default). It is an **analytic reference policy** for labeling and comparison, not a proof of kinodynamic optimality.
+3. **Hybrid fallback fixes heading only** — when the network plan fails the scoring rollout, hybrid runs a 36-heading sweep at the network-chosen time and propagated ball position. It does **not** re-check reachability or re-sweep $T$.
+4. **Impact speed assumption** — scoring rollouts and the NMPC terminal target assume $v_{impact}=1.0$ m/s at contact. Closed-loop tracking may not achieve this exactly; the gap is part of what integration success rates measure.
+5. **Goal pass-through mismatch (planner vs simulator)** — pre-strike ball propagation in `analytic_strike_plan()` bounces at the right wall ($x=W$). The simulator allows pass-through when the ball is in the goal mouth. This affects rare self-scoring trajectories only; unstruck goals are excluded from the success metric. Aligning planner and simulator here requires passing `goal` into pre-strike propagation, **dataset regen, and retrain** (future work — see [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md)).
+
+---
+
 ## 📊 Dataset & Generation Constraints
 
 The generator (`src/data_generator.py`) calls `analytic_strike_plan()` to produce reachable scoring scenarios:
@@ -110,7 +122,7 @@ The old closest-approach position threshold ($\le 0.35$ m) is **not** a pass gat
 * `strike_point_pred_err_m` — predicted target vs ball-at-contact
 * `strike_time_err_s` — timing error vs predicted horizon
 
-**Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`, cross-config analysis via `scripts/analyze_comparison.py`.
+**Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_target_vs_ball_traj_m` (legacy network: predicted $(x,y)$ vs propagated ball at $T$; alias `net_vs_analytic_pos_m`), network-vs-fallback breakdown via `scripts/analyze_fallback.py`, cross-config analysis via `scripts/analyze_comparison.py`.
 
 ### Hybrid fallback vs full analytic (latency)
 

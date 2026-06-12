@@ -85,7 +85,7 @@ def load_fallback_data(batch_dir: Path) -> pd.DataFrame:
             "strike_point_pred_err_m": strike_point_pred_err_m,
             "strike_pos_err": contact_dist,          # kept for backward-compat plots
             "strike_heading_err": contact_heading_err,
-            "net_vs_analytic_pos_m": meta.get("net_vs_analytic_pos_m", np.nan),
+            "net_vs_analytic_pos_m": meta.get("net_target_vs_ball_traj_m", meta.get("net_vs_analytic_pos_m", np.nan)),
             "strikenet_infer_ms": meta.get("strikenet_infer_ms", np.nan),
             "decision_latency_ms": meta.get("decision_latency_ms", np.nan),
             "fallback_sweep_ms": meta.get("fallback_sweep_ms", np.nan),
@@ -197,7 +197,6 @@ def write_summary(df: pd.DataFrame, stats: dict, output_dir: Path, batch_id: str
 
     n = len(df)
     overall = df["success"].mean() * 100
-    unstruck = int(df.get("ball_struck", df["success"] * 0).eq(False).sum()) if "ball_struck" in df.columns else 0
     unstruck = int((df["scored"] & ~df["ball_struck"]).sum()) if "scored" in df.columns and "ball_struck" in df.columns else 0
     net, fb = stats["network"], stats["fallback"]
 

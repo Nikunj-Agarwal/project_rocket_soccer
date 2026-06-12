@@ -135,6 +135,9 @@ def analytic_strike_plan(
         # restarting from ball_pos each iteration (same trick as data_generator).
         while t_current < T - 1e-12:
             step_dt = min(ball_dt, T - t_current)
+            # Deliberately omit goal= here: pre-strike search assumes right-wall bounce.
+            # Simulator allows goal pass-through (unstruck goals excluded from success).
+            # Changing this requires dataset regen + retrain (see PHYSICS_CONSTRAINTS_ASSUMPTIONS.md).
             bp, bv = propagate_ball_step(
                 bp, bv, step_dt,
                 field_w=field_w, field_h=field_h, restitution=ball_restitution,

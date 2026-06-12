@@ -162,7 +162,7 @@ python -m scripts.analyze_comparison   # step 8: worth_it_summary.md, Pareto plo
 | `strike_target` | `[x, y, theta]` chosen strike point |
 | `contact_pos_err_m` / `final_pos_err_m` | Closest-approach distance (diagnostic) |
 | `final_heading_err_rad` | Heading error at closest approach |
-| `net_vs_analytic_pos_m` | Legacy network: predicted $(x,y)$ vs propagated ball at $T$ |
+| `net_target_vs_ball_traj_m` | Legacy network: $\|\text{predicted target} - \text{ball on trajectory at } T\|$ (`net_vs_analytic_pos_m` deprecated alias) |
 | `N_steps`, `T_final_s`, `strike_step` | Horizon and contact timing |
 
 **Latency**

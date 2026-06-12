@@ -592,6 +592,68 @@ def plot_decision_latency(df_runs, output_dir: Path):
     print(f"  Saved decision latency plot to: {out_path}")
 
 
+def _corr_strength(r: float) -> str:
+    a = abs(r)
+    if a < 0.2:
+        return "weak"
+    if a < 0.5:
+        return "moderate"
+    return "strong"
+
+
+def _solver_convergence_summary(df_runs) -> tuple[int, int, float]:
+    total_failures = int(df_runs["solver_failures"].sum())
+    total_steps = int(df_runs["N_steps"].sum())
+    pct = 100.0 * (1.0 - total_failures / max(total_steps, 1))
+    return total_failures, total_steps, pct
+
+
+def _realtime_feasibility_line(df_runs) -> str:
+    mean_ms = float(df_runs["avg_solve_ms"].mean())
+    max_ms = float(df_runs["max_solve_ms"].max())
+    if mean_ms < 100.0 and max_ms < 100.0:
+        return (
+            f"Mean solve time is **{mean_ms:.2f} ms** and peak latency is **{max_ms:.2f} ms**, "
+            f"both below the 100 ms control period (Δt = 100 ms)."
+        )
+    return (
+        f"Mean solve time is **{mean_ms:.2f} ms**; peak latency is **{max_ms:.2f} ms**. "
+        f"At least one of these exceeds the 100 ms control period — review per-step "
+        f"`solve_ms` in trajectory logs before claiming hard real-time feasibility."
+    )
+
+
+def _correlation_takeaways(corr_matrix) -> str:
+    r_dist_pos = float(corr_matrix.loc["Init Dist", "Pos Err"])
+    r_speed_lat = float(corr_matrix.loc["Ball Speed", "Solve Time"])
+    r_steer_acc = float(corr_matrix.loc["RMS Steer", "RMS Acc"])
+
+    s_dist = _corr_strength(r_dist_pos)
+    s_speed = _corr_strength(r_speed_lat)
+    s_steer = _corr_strength(r_steer_acc)
+
+    dist_interp = (
+        "suggesting limited sensitivity of closest-approach distance to initial separation in this batch."
+        if s_dist in ("weak", "moderate")
+        else "indicating initial separation may influence closest-approach distance in this batch."
+    )
+    speed_interp = (
+        "suggesting limited sensitivity of per-run mean solve time to initial ball speed in this batch."
+        if s_speed in ("weak", "moderate")
+        else "indicating initial ball speed may influence per-run mean solve time in this batch."
+    )
+    steer_interp = (
+        "suggesting limited coupling between steering and acceleration effort in this batch."
+        if s_steer in ("weak", "moderate")
+        else "indicating steering and acceleration effort may be coupled in this batch."
+    )
+
+    return f"""### Key Scientific Takeaways:
+1. **Initial Distance vs. Contact Distance:** Pearson r = {r_dist_pos:+.3f} ({s_dist} correlation between `Init Dist` and `Pos Err`), {dist_interp}
+2. **Initial Ball Speed vs. Solver Latency:** Pearson r = {r_speed_lat:+.3f} ({s_speed} correlation between `Ball Speed` and `Solve Time`), {speed_interp}
+3. **Steering vs. Acceleration Effort:** Pearson r = {r_steer_acc:+.3f} ({s_steer} correlation between `RMS Steer` and `RMS Acc`), {steer_interp}"""
+
+
 def _scalability_section(df_runs) -> str:
     """Return a markdown string for the scalability subsection of the report."""
     lat_cols = ["strikenet_infer_ms", "analytic_strategy_ms", "speedup_factor"]
@@ -707,6 +769,27 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
     if model_variant:
         config_line += f"  |  **Model variant:** `{model_variant}`"
 
+    total_failures, total_steps, convergence_pct = _solver_convergence_summary(df_runs)
+    if total_failures == 0:
+        convergence_line = (
+            f"**Solver convergence:** **{convergence_pct:.1f}%** "
+            f"(no zero-control fallbacks across {total_steps} NMPC solves)."
+        )
+    else:
+        convergence_line = (
+            f"**Solver convergence:** **{convergence_pct:.1f}%** "
+            f"({total_failures} zero-control fallbacks across {total_steps} NMPC solves)."
+        )
+    actuator_line = (
+        "Control inputs remain within NMPC bounds by construction "
+        "($|a| \\le 2.0\\text{ m/s}^2$, $|\\delta| \\le \\pi/4\\text{ rad}$); "
+        "mean step-to-step chatter is reported in Section 5."
+    )
+    correlation_takeaways = _correlation_takeaways(corr_matrix)
+    realtime_line = _realtime_feasibility_line(df_runs)
+    mean_chatter_acc = float(df_runs["chatter_acc"].mean())
+    mean_chatter_steer = float(df_runs["chatter_steer"].mean())
+
     # Generate LaTeX code
     latex_stats_rows = []
     for row in stats_data:
@@ -743,8 +826,8 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
 The NMPC striker agent was evaluated across **{n_seeds} distinct random seeds** consisting of dynamic initial conditions, high-velocity target ball states, and complex wall-rebounding trajectories.
 * **Goal scoring success rate (Accuracy):** **{success_rate:.1f}%** (strike-gated: only goals following a car–ball contact are counted)
 * **Goals without car contact (excluded from success):** {unstruck_goals}
-* **Dynamic Convergence:** The combination of NMPC with a **Pursuit-Based Warm-Start** resulted in 100% solver convergence across all challenging initial heading orientations.
-* **Actuator Integrity:** Acceleration and steering inputs successfully respect boundary constraints ($|a| \\le 2.0\\text{{ m/s }}^2$ and $|\\delta| \\le \\pi/4\\text{{ rad }}$) without high-frequency chattering or instability.
+* {convergence_line}
+* **Actuator bounds:** {actuator_line}
 
 ---
 
@@ -767,10 +850,7 @@ This matrix evaluates the sensitivity of the NMPC closed-loop performance agains
 
 {corr_md}
 
-### Key Scientific Takeaways:
-1. **Initial Distance Sensitivity:** The correlation between `Init Distance` and `Strike Pos Err` is very low, showing that the NMPC system successfully stabilizes and converges to an extremely accurate strike regardless of how far the car starts from the target.
-2. **Initial Ball Speed vs. Solver Latency:** The solver compute times (`Avg Solver Ms`) show minimal sensitivity to initial ball speed, indicating that the symbolic RK4 integrator handles dynamic target velocity scaling smoothly in constant real-time iterations.
-3. **Steering vs. Acceleration Effort:** A high correlation between steering and acceleration inputs confirms that the vehicle utilizes integrated speed-profile optimization to execute high-curvature cornering maneuvers.
+{correlation_takeaways}
 
 ---
 
@@ -784,8 +864,8 @@ You can directly copy-paste this LaTeX table code into your research paper docum
 ---
 
 ## 5. Actuator Stability & Real-time Feasibility Analysis
-* **Control Chattering:** The mean absolute step-to-step changes in acceleration ($\\Delta a = {df_runs['chatter_acc'].mean():.4f}\\text{{ m/s }}^2$) and steering ($\\Delta \\delta = {df_runs['chatter_steer'].mean():.4f}\\text{{ rad }}$) confirm that the warm-started NMPC provides smooth control signals, which is highly beneficial for extending the lifespan of real mechanical servo-actuators.
-* **Computation Feasibility:** With a mean solve time of `{df_runs['avg_solve_ms'].mean():.2f} ms` and a maximum peak latency of `{df_runs['max_solve_ms'].max():.2f} ms`, the control loop comfortably satisfies real-time execution bounds (control period $\\Delta t = 100\\text{{ ms }}$).
+* **Control Chattering:** Mean absolute step-to-step changes were $\\Delta a = {mean_chatter_acc:.4f}\\text{{ m/s }}^2$ and $\\Delta \\delta = {mean_chatter_steer:.4f}\\text{{ rad }}$ (reported for this batch; lower values indicate smoother actuation).
+* **Computation Feasibility:** {realtime_line}
 
 ---
 

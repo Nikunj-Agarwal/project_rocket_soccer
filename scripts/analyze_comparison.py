@@ -393,9 +393,10 @@ def write_summary(agg: pd.DataFrame, paired: pd.DataFrame, wm: pd.DataFrame,
         nl = A.get("neural_legacy")
         retention = (hl["success_rate"] / an["success_rate"] * 100) if an["success_rate"] else float("nan")
         lines += ["## Is the neural net worth it?", ""]
-        lines.append(f"- **Analytic ceiling**: {an['success_rate']*100:.1f}% success at "
-                     f"~{_fmt(an['median_latency_ms'], 0)} ms/decision. This is the planning oracle; "
-                     "the <100% reflects closed-loop NMPC tracking + strike-gating, not planning.")
+        lines.append(f"- **Analytic reference policy**: {an['success_rate']*100:.1f}% success at "
+                     f"~{_fmt(an['median_latency_ms'], 0)} ms/decision. This is the full "
+                     "analytic search baseline; the <100% reflects closed-loop NMPC tracking + "
+                     "strike-gating, not planning alone.")
         lines.append(f"- **Hybrid (legacy)**: {hl['success_rate']*100:.1f}% success "
                      f"= {retention:.0f}% of the analytic ceiling. "
                      f"Network-trusted median latency: {_fmt(hl.get('median_net_latency_ms'), 2)} ms; "

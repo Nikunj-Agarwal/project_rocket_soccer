@@ -77,17 +77,22 @@ def decide_strike_target(planner_mode, model, model_variant, input7,
                                     ball_dt=dt, ball_restitution=ball_restitution)
         if plan is None:
             T = 2.0
-            sp, sv = propagate_ball_for_time(ball_start, ball_vel, T, dt=dt,
+            N_steps = max(1, min(50, int(round(T / dt))))
+            T_final = N_steps * dt
+            sp, sv = propagate_ball_for_time(ball_start, ball_vel, T_final, dt=dt,
                                              field_w=field_w, field_h=field_h,
                                              restitution=ball_restitution)
             path_ms = (time.perf_counter() - t_path) * 1e3
-            return T, float(sp[0]), float(sp[1]), goal_los(sp[0], sp[1]), "analytic_infeasible", sp, sv, path_ms, 0.0
-        T, x, y, theta = plan
-        sp, sv = propagate_ball_for_time(ball_start, ball_vel, T, dt=dt,
+            return (float(T_final), float(sp[0]), float(sp[1]), goal_los(sp[0], sp[1]),
+                    "analytic_infeasible", sp, sv, path_ms, 0.0)
+        T, _, _, theta = plan
+        N_steps = max(1, min(50, int(round(T / dt))))
+        T_final = N_steps * dt
+        sp, sv = propagate_ball_for_time(ball_start, ball_vel, T_final, dt=dt,
                                          field_w=field_w, field_h=field_h,
                                          restitution=ball_restitution)
         path_ms = (time.perf_counter() - t_path) * 1e3
-        return float(T), float(x), float(y), float(theta), "analytic", sp, sv, path_ms, 0.0
+        return float(T_final), float(sp[0]), float(sp[1]), float(theta), "analytic", sp, sv, path_ms, 0.0
 
     # ---------- NEURAL / HYBRID (model required) ----------
     preds = model.predict(input7)
@@ -266,9 +271,9 @@ def run_simulation(
 
     N_steps = max(1, min(50, int(round(T_final / dt))))
     
-    net_vs_analytic = 0.0
+    net_target_vs_ball_traj_m = 0.0
     if target_source == "network" and model_variant == "legacy":
-        net_vs_analytic = np.hypot(x_strike_tgt - strike_pos[0], y_strike_tgt - strike_pos[1])
+        net_target_vs_ball_traj_m = np.hypot(x_strike_tgt - strike_pos[0], y_strike_tgt - strike_pos[1])
 
     print("=" * 65)
     print("  PLANNER PREDICTION")
@@ -323,6 +328,7 @@ def run_simulation(
     total_solve_ms = 0.0
     strike_step = None
     ball_at_strike = None  # ball position at the exact moment of contact
+    u_prev = np.array([0.0, 0.0])
 
     print("Running shrinking-horizon NMPC simulation...")
     for step in range(N_steps):
@@ -339,7 +345,10 @@ def run_simulation(
 
         if np.allclose(u0, 0.0) and N_remaining > 1:
             solver_failures += 1
-            print(f"[NMPC] Warning at step {step}: Solver returned zero control.")
+            u0 = u_prev.copy()
+            print(f"[NMPC] Warning at step {step}: Solver returned zero control; holding previous u.")
+        else:
+            u_prev = u0.copy()
 
         # Advance world physics
         world.step(u0)
@@ -506,7 +515,8 @@ def run_simulation(
             "field_size_m": list(field_size),
             "strike_target": [x_strike_tgt, y_strike_tgt, theta_strike_tgt],
             "target_source": target_source,
-            "net_vs_analytic_pos_m": float(net_vs_analytic),
+            "net_target_vs_ball_traj_m": float(net_target_vs_ball_traj_m),
+            "net_vs_analytic_pos_m": float(net_target_vs_ball_traj_m),  # deprecated alias
             "strike_step": strike_step,
             # --- Scalability / latency fields ---
             # decision_latency_ms: wall-clock deployed path (includes hybrid fallback sweep).
