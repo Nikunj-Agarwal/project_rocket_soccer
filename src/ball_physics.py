@@ -136,20 +136,11 @@ def compute_strike_velocity(
     # Component of relative velocity along the normal of collision
     v_rel_n = np.dot(v_rel, n)
     
-    # If they are moving towards each other (v_rel_n < 0), perform impact reflection.
-    # If they are already moving apart or car is pushing the ball from behind (v_rel_n >= 0),
-    # the car bumper still gives a forward velocity if the car is moving faster.
-    # To handle both cases robustly:
     if v_rel_n < 0:
-        # Reflect relative normal velocity component
+        # Approaching along the normal: reflect the relative normal component
         v_rel_post = v_rel - (1.0 + e_strike) * v_rel_n * n
         return v_rel_post + v_car_vec
-    else:
-        # If the car is moving faster in the normal direction than the ball,
-        # it pushes the ball forward.
-        v_ball_n = np.dot(ball_vel, n)
-        if v_car > v_ball_n:
-            # Transfer momentum along normal
-            return ball_vel + (v_car - v_ball_n) * (1.0 + e_strike) * n
-        return ball_vel
+    # v_rel_n >= 0 means the ball already moves away from the bumper at least
+    # as fast as the car along the normal — no impulse, velocity unchanged.
+    return ball_vel
 

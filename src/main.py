@@ -40,6 +40,7 @@ from src.simulator import World
 from src.nmpc_solver import InterceptionMPC
 from src.network import StrikeNet
 from src.goal import Goal
+from src.planner import analytic_strike_plan
 
 def run_simulation(
     ball_start: np.ndarray,
@@ -56,6 +57,7 @@ def run_simulation(
     field_size: tuple = (DEFAULT_FIELD_W, DEFAULT_FIELD_H),
     ball_restitution: float = DEFAULT_BALL_RESTITUTION,
     dt: float = DEFAULT_BALL_DT,
+    offset_dist: float = 0.32,
 ):
     """
     Runs the closed-loop shrinking-horizon NMPC simulation.
@@ -82,12 +84,55 @@ def run_simulation(
         car_start[0], car_start[1], car_start[2]
     ], dtype=np.float32)
 
-    # 3. Query StrikeNet
-    preds = model.predict(inputs) # Returns [T_strike, x_strike, y_strike, theta_strike]
+    # 3. Query StrikeNet — with warm-up + repeated timing for latency logging.
+    # We force CPU for the timing comparison so the measurement is comparable to
+    # the analytic search (also single-threaded NumPy CPU).
+    TIMING_REPEATS = 30
+    TIMING_DEVICE = "cpu"
+    timing_model = StrikeNet()
+    timing_model.load_state_dict(model.state_dict())
+    timing_model = timing_model.to(TIMING_DEVICE)
+    timing_model.eval()
+    timing_inputs = inputs.copy()
+
+    # Warm-up (discarded): absorbs lazy init and JIT costs
+    for _ in range(3):
+        timing_model.predict(timing_inputs)
+
+    _infer_times = []
+    for _ in range(TIMING_REPEATS):
+        _t0 = time.perf_counter()
+        timing_model.predict(timing_inputs)
+        _infer_times.append((time.perf_counter() - _t0) * 1e3)  # ms
+    strikenet_infer_ms = float(np.median(_infer_times))
+
+    # Run the actual (potentially GPU) predict for control
+    preds = model.predict(inputs)  # Returns [T_strike, x_strike, y_strike, theta_strike]
     T_strike = float(preds[0])
     x_strike = float(preds[1])
     y_strike = float(preds[2])
     theta_strike = float(preds[3])
+
+    # Timed analytic planner on same scene — pure measurement, does NOT drive control.
+    # Warm-up
+    _car_state_arr = np.array([car_start[0], car_start[1], car_start[2]])
+    for _ in range(3):
+        analytic_strike_plan(
+            ball_start.copy(), ball_vel.copy(), _car_state_arr, goal,
+            field_w=field_size[0], field_h=field_size[1],
+            ball_dt=dt, ball_restitution=ball_restitution,
+        )
+    _analytic_times = []
+    for _ in range(TIMING_REPEATS):
+        _t0 = time.perf_counter()
+        analytic_strike_plan(
+            ball_start.copy(), ball_vel.copy(), _car_state_arr, goal,
+            field_w=field_size[0], field_h=field_size[1],
+            ball_dt=dt, ball_restitution=ball_restitution,
+        )
+        _analytic_times.append((time.perf_counter() - _t0) * 1e3)  # ms
+    analytic_strategy_ms = float(np.median(_analytic_times))
+    speedup_factor = analytic_strategy_ms / max(strikenet_infer_ms, 1e-6)
 
     # Convert T_strike to discrete steps
     N_steps = int(round(T_strike / dt))
@@ -100,10 +145,14 @@ def run_simulation(
     print(f"  Predicted x_strike    : {x_strike:.3f} m")
     print(f"  Predicted y_strike    : {y_strike:.3f} m")
     print(f"  Predicted theta_strike : {theta_strike:+.3f} rad ({np.degrees(theta_strike):.1f} deg)")
+    print(f"  StrikeNet infer (CPU) : {strikenet_infer_ms:.3f} ms  (median/{TIMING_REPEATS} reps)")
+    print(f"  Analytic search       : {analytic_strategy_ms:.1f} ms  (median/{TIMING_REPEATS} reps)")
+    print(f"  Speedup factor        : {speedup_factor:.1f}x")
     print("-" * 65)
 
-    # Define strike state for NMPC
-    # Bounce-aware ball position at T_final (matches World.step physics)
+    # Define strike state for NMPC from the network's prediction.
+    # The analytic ball rollout is kept only as a diagnostic and as a
+    # sanity-check fallback if the predicted heading cannot score.
     T_final = N_steps * dt
     field_w, field_h = field_size
     strike_pos, strike_vel = propagate_ball_for_time(
@@ -115,16 +164,17 @@ def run_simulation(
         field_h=field_h,
         restitution=ball_restitution,
     )
-    x_strike_exact = float(strike_pos[0])
-    y_strike_exact = float(strike_pos[1])
-    
-    # Sweep candidates at runtime to find exact scoring heading
-    theta_candidates = np.linspace(-np.pi, np.pi, 36, endpoint=False)
-    best_theta = None
-    for theta_cand in theta_candidates:
-        v_post = compute_strike_velocity(strike_vel, v_car=v_impact, theta_car=theta_cand, e_strike=0.8)
+
+    # Network-predicted strike target, clipped to the playable field
+    x_strike_net = float(np.clip(x_strike, 0.0, field_w))
+    y_strike_net = float(np.clip(y_strike, 0.0, field_h))
+    net_vs_analytic = np.hypot(x_strike_net - strike_pos[0], y_strike_net - strike_pos[1])
+
+    def _scores(pos_xy: np.ndarray, theta: float) -> bool:
+        """Does striking at pos_xy with heading theta send the ball into the goal?"""
+        v_post = compute_strike_velocity(strike_vel, v_car=v_impact, theta_car=theta, e_strike=0.8)
         final_pos, _ = propagate_ball_for_time(
-            strike_pos,
+            pos_xy,
             v_post,
             total_time=5.0,
             dt=dt,
@@ -133,24 +183,45 @@ def run_simulation(
             restitution=ball_restitution,
             goal=goal,
         )
-        if final_pos[0] >= goal.x - 1e-9 and goal.y_min <= final_pos[1] <= goal.y_max:
-            best_theta = theta_cand
-            break
-            
-    if best_theta is None:
-        # Fallback to line of sight to goal center
-        best_theta = np.arctan2(goal.center[1] - y_strike_exact, goal.center[0] - x_strike_exact)
-        
-    theta_strike_exact = best_theta
+        return final_pos[0] >= goal.x - 1e-9 and goal.y_min <= final_pos[1] <= goal.y_max
+
+    if _scores(np.array([x_strike_net, y_strike_net]), theta_strike):
+        # Trust the network end-to-end
+        target_source = "network"
+        x_strike_tgt = x_strike_net
+        y_strike_tgt = y_strike_net
+        theta_strike_tgt = theta_strike
+    else:
+        # Fallback: analytic strike point + scoring-heading sweep
+        target_source = "fallback"
+        x_strike_tgt = float(strike_pos[0])
+        y_strike_tgt = float(strike_pos[1])
+
+        theta_los_goal = np.arctan2(goal.center[1] - y_strike_tgt, goal.center[0] - x_strike_tgt)
+        scoring_thetas = [
+            theta_cand
+            for theta_cand in np.linspace(-np.pi, np.pi, 36, endpoint=False)
+            if _scores(strike_pos, theta_cand)
+        ]
+        if scoring_thetas:
+            # Pick the scoring heading closest to line-of-sight to the goal
+            # (same canonical choice as the dataset labels)
+            theta_strike_tgt = min(
+                scoring_thetas,
+                key=lambda th: abs(np.arctan2(np.sin(th - theta_los_goal), np.cos(th - theta_los_goal))),
+            )
+        else:
+            theta_strike_tgt = theta_los_goal
 
     print(f"  Ball bounce           : restitution={ball_restitution}, field={field_w}x{field_h} m")
-    print(f"  Exact strike target   : x={x_strike_exact:.3f} m, y={y_strike_exact:.3f} m, theta={theta_strike_exact:+.3f} rad")
+    print(f"  Net vs analytic ball  : {net_vs_analytic:.3f} m apart at T_final={T_final:.2f} s")
+    print(f"  Target source         : {target_source}")
+    print(f"  Strike target         : x={x_strike_tgt:.3f} m, y={y_strike_tgt:.3f} m, theta={theta_strike_tgt:+.3f} rad")
     print("-" * 65)
     
-    offset_dist = 0.32
-    x_target = x_strike_exact - offset_dist * np.cos(theta_strike_exact)
-    y_target = y_strike_exact - offset_dist * np.sin(theta_strike_exact)
-    q_strike = np.array([x_target, y_target, theta_strike_exact, v_impact])
+    x_target = x_strike_tgt - offset_dist * np.cos(theta_strike_tgt)
+    y_target = y_strike_tgt - offset_dist * np.sin(theta_strike_tgt)
+    q_strike = np.array([x_target, y_target, theta_strike_tgt, v_impact])
     
     # 4. Initialize World and InterceptionMPC
     world = World(
@@ -206,8 +277,8 @@ def run_simulation(
         # Compute errors relative to current ball position
         pos_err = np.linalg.norm(world.car_state[:2] - world.ball_pos)
         heading_err = abs(np.arctan2(
-            np.sin(world.car_state[2] - theta_strike_exact),
-            np.cos(world.car_state[2] - theta_strike_exact)
+            np.sin(world.car_state[2] - theta_strike_tgt),
+            np.cos(world.car_state[2] - theta_strike_tgt)
         ))
 
         step_data = {
@@ -240,7 +311,9 @@ def run_simulation(
             break
 
     # 6. Phase 2: Post-Strike Coasting & Ball Flight
-    POST_STRIKE_STEPS = 50 # up to 5 seconds
+    POST_STRIKE_STEPS = 80 # up to 8 seconds; loop breaks early once scored,
+                           # so this only extends episodes where the ball is
+                           # still travelling toward the goal (e.g. late/slow strikes)
     print("Running post-strike propagation...")
     for post_step in range(POST_STRIKE_STEPS):
         if world.scored:
@@ -283,8 +356,8 @@ def run_simulation(
     
     # Wrap heading error
     final_heading_err = abs(np.arctan2(
-        np.sin(final_car[2] - theta_strike_exact),
-        np.cos(final_car[2] - theta_strike_exact)
+        np.sin(final_car[2] - theta_strike_tgt),
+        np.cos(final_car[2] - theta_strike_tgt)
     ))
 
     print("\n" + "=" * 65)
@@ -326,10 +399,18 @@ def run_simulation(
             "T_final_s": float(T_final),
             "ball_restitution": ball_restitution,
             "field_size_m": list(field_size),
-            "strike_target": [x_strike_exact, y_strike_exact, theta_strike_exact],
+            "strike_target": [x_strike_tgt, y_strike_tgt, theta_strike_tgt],
+            "target_source": target_source,
+            "net_vs_analytic_pos_m": float(net_vs_analytic),
             "scored": bool(world.scored),
             "ball_struck": bool(world.ball_struck),
             "strike_step": strike_step,
+            # --- Scalability / latency fields ---
+            "strikenet_infer_ms": strikenet_infer_ms,
+            "analytic_strategy_ms": analytic_strategy_ms,
+            "speedup_factor": speedup_factor,
+            "timing_device": TIMING_DEVICE,
+            "timing_repeats": TIMING_REPEATS,
         }
         if run_metadata:
             meta.update(run_metadata)

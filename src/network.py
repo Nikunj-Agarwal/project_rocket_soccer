@@ -27,13 +27,17 @@ class StrikeNet(nn.Module):
             nn.Linear(64, 5)
         )
         
-        # We will save normalization parameters in the model state
+        # We will save normalization parameters in the model state.
+        # Outputs are z-scored too so the MSE loss weights T/x/y and the
+        # sin/cos heading terms comparably (raw scales differ by ~5-10x).
         self.register_buffer('input_mean', torch.zeros(7))
         self.register_buffer('input_std', torch.ones(7))
+        self.register_buffer('output_mean', torch.zeros(5))
+        self.register_buffer('output_std', torch.ones(5))
         
     def forward(self, x):
         # x shape: (batch_size, 7)
-        # Normalize input
+        # Normalize input; the network predicts z-scored outputs
         x_norm = (x - self.input_mean) / (self.input_std + 1e-8)
         return self.net(x_norm)
     
@@ -53,8 +57,9 @@ class StrikeNet(nn.Module):
             if x.dim() == 1:
                 x = x.unsqueeze(0)
             
-            # Forward pass
+            # Forward pass (z-scored) then de-normalize to physical units
             out = self(x)  # (N, 5)
+            out = out * (self.output_std + 1e-8) + self.output_mean
             
             # Extract outputs
             T = out[:, 0].cpu().numpy()
@@ -112,12 +117,14 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
     # Initialize model
     model = StrikeNet()
     
-    # Calculate input normalization from training set
-    # Gather all train inputs
+    # Calculate input/output normalization from the training split only
     train_indices = train_dataset.indices
     X_train = X[train_indices]
+    Y_train = Y[train_indices]
     model.input_mean.copy_(X_train.mean(dim=0))
     model.input_std.copy_(X_train.std(dim=0))
+    model.output_mean.copy_(Y_train.mean(dim=0))
+    model.output_std.copy_(Y_train.std(dim=0))
     
     # Optimizer & Loss
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -136,15 +143,18 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
     log_data = []
     
     print(f"Starting training on {device}...")
-    for epoch in range(1, epochs + 1):
+    from tqdm import tqdm
+    pbar = tqdm(range(1, epochs + 1), desc="Training StrikeNet")
+    for epoch in pbar:
         model.train()
         train_loss = 0.0
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            target = (batch_y - model.output_mean) / (model.output_std + 1e-8)
             
             optimizer.zero_grad()
             preds = model(batch_x)
-            loss = criterion(preds, batch_y)
+            loss = criterion(preds, target)
             loss.backward()
             optimizer.step()
             
@@ -157,15 +167,15 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
         with torch.no_grad():
             for batch_x, batch_y in test_loader:
                 batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                target = (batch_y - model.output_mean) / (model.output_std + 1e-8)
                 preds = model(batch_x)
-                loss = criterion(preds, batch_y)
+                loss = criterion(preds, target)
                 test_loss += loss.item() * batch_x.size(0)
             test_loss /= len(test_loader.dataset)
             
         log_data.append({'epoch': epoch, 'train_loss': train_loss, 'test_loss': test_loss})
         
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch:3d}/{epochs} | Train Loss: {train_loss:.4f} | Test Loss: {test_loss:.4f}")
+        pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}", best=f"{best_test_loss if best_test_loss != float('inf') else test_loss:.4f}")
             
         # Early stopping and saving best model
         if test_loss < best_test_loss:
@@ -176,7 +186,7 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(f"Early stopping at epoch {epoch}! Best Test Loss: {best_test_loss:.4f}")
+                pbar.write(f"Early stopping at epoch {epoch}! Best Test Loss: {best_test_loss:.4f}")
                 break
                 
     # Save log

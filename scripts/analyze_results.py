@@ -67,10 +67,10 @@ def load_batch_data(batch_dir: Path):
             init_ball_y = df["ball_y"].iloc[0]
             init_dist = np.hypot(init_car_x - init_ball_x, init_car_y - init_ball_y)
             
-            # Initial ball speed from first passive step diff
+            # Initial ball speed from first passive step diff (dt = 0.1 s)
             if len(df) > 1:
-                ball_vx = (df["ball_x"].iloc[1] - df["ball_x"].iloc[0]) / 0.05
-                ball_vy = (df["ball_y"].iloc[1] - df["ball_y"].iloc[0]) / 0.05
+                ball_vx = (df["ball_x"].iloc[1] - df["ball_x"].iloc[0]) / 0.1
+                ball_vy = (df["ball_y"].iloc[1] - df["ball_y"].iloc[0]) / 0.1
                 init_ball_speed = np.hypot(ball_vx, ball_vy)
             else:
                 init_ball_speed = 0.0
@@ -109,6 +109,10 @@ def load_batch_data(batch_dir: Path):
             "chatter_steer": chatter_steer,
             "avg_solve_ms": avg_solve_ms,
             "max_solve_ms": max_solve_ms,
+            # --- Scalability / latency fields (None if batch predates logging) ---
+            "strikenet_infer_ms": meta.get("strikenet_infer_ms", None),
+            "analytic_strategy_ms": meta.get("analytic_strategy_ms", None),
+            "speedup_factor": meta.get("speedup_factor", None),
         })
         
         trajectories[seed] = df
@@ -224,8 +228,8 @@ def plot_control_profiles(trajectories, output_dir: Path):
     axes[0].plot(normalized_steps, mean_acc, color="#3498db", linewidth=2.5, label="Mean Input")
     axes[0].fill_between(normalized_steps, p10_acc, p90_acc, color="#3498db", alpha=0.25, label="10th - 90th Percentile")
     axes[0].fill_between(normalized_steps, min_acc, max_acc, color="#3498db", alpha=0.1, label="Envelope Min / Max")
-    axes[0].axhline(4.0, color="r", linestyle="--", linewidth=1.2, label="Bounds (+/- 4 m/s²)")
-    axes[0].axhline(-4.0, color="r", linestyle="--", linewidth=1.2)
+    axes[0].axhline(2.0, color="r", linestyle="--", linewidth=1.2, label="Bounds (+/- 2 m/s²)")
+    axes[0].axhline(-2.0, color="r", linestyle="--", linewidth=1.2)
     axes[0].set_ylabel("Acceleration $a$ ($m/s^2$)", fontsize=11)
     axes[0].set_title("NMPC Control Trajectory Profile (Physical Envelopes)", fontsize=13, fontweight="bold", pad=10)
     axes[0].grid(True, linestyle="--", alpha=0.4)
@@ -241,9 +245,9 @@ def plot_control_profiles(trajectories, output_dir: Path):
     axes[1].plot(normalized_steps, mean_steer, color="#9b59b6", linewidth=2.5, label="Mean Input")
     axes[1].fill_between(normalized_steps, p10_steer, p90_steer, color="#9b59b6", alpha=0.25, label="10th - 90th Percentile")
     axes[1].fill_between(normalized_steps, min_steer, max_steer, color="#9b59b6", alpha=0.1, label="Envelope Min / Max")
-    axes[1].axhline(0.4, color="r", linestyle="--", linewidth=1.2, label="Bounds (+/- 0.40 rad)")
-    axes[1].axhline(-0.4, color="r", linestyle="--", linewidth=1.2)
-    axes[1].set_ylabel("Steering angle $\delta$ ($rad$)", fontsize=11)
+    axes[1].axhline(np.pi / 4, color="r", linestyle="--", linewidth=1.2, label="Bounds (+/- 0.785 rad)")
+    axes[1].axhline(-np.pi / 4, color="r", linestyle="--", linewidth=1.2)
+    axes[1].set_ylabel("Steering angle $\\delta$ ($rad$)", fontsize=11)
     axes[1].set_xlabel("Normalized Run Timeline (% to Interception)", fontsize=11)
     axes[1].grid(True, linestyle="--", alpha=0.4)
     axes[1].legend(loc="lower left", fontsize=9, ncol=2)
@@ -315,7 +319,7 @@ def plot_solver_performance(df_runs, trajectories, output_dir: Path):
 
     # 1. Latency distribution
     axes[0].hist(all_solve_times, bins=25, color="#34495e", alpha=0.75, edgecolor="black")
-    axes[0].axvline(50.0, color="#e74c3c", linestyle="--", linewidth=1.8, label="Control Period (50 ms)")
+    axes[0].axvline(100.0, color="#e74c3c", linestyle="--", linewidth=1.8, label="Control Period (100 ms)")
     
     mean_lat = np.mean(all_solve_times)
     axes[0].axvline(mean_lat, color="#27ae60", linestyle="-.", linewidth=1.5, label=f"Mean ({mean_lat:.2f} ms)")
@@ -453,7 +457,7 @@ def plot_solver_latency_evolution(trajectories, output_dir: Path):
     plt.plot(valid_steps, mean_times, color="#2c3e50", linewidth=2.5, label="Mean Step Solve Time")
     plt.fill_between(valid_steps, p10_times, p90_times, color="#2c3e50", alpha=0.2, label="10th - 90th Percentile")
     
-    plt.axhline(50.0, color="#e74c3c", linestyle="--", linewidth=1.2, label="Real-time Budget (50ms)")
+    plt.axhline(100.0, color="#e74c3c", linestyle="--", linewidth=1.2, label="Real-time Budget (100ms)")
     
     plt.title("NMPC Step Compute Latency Profile over Time", fontsize=12, fontweight="bold", pad=12)
     plt.xlabel("Simulation Step Index", fontsize=11)
@@ -497,6 +501,84 @@ def plot_chattering_phase_portrait(trajectories, output_dir: Path):
     plt.savefig(out_path, dpi=200)
     plt.close()
     print(f"  Saved chattering phase portrait to: {out_path}")
+
+
+def plot_decision_latency(df_runs, output_dir: Path):
+    """
+    9. Decision Latency Comparison (StrikeNet vs Analytic Search):
+    Grouped bar chart comparing per-seed inference time with analytic search time on a
+    log-y axis, annotated with the median speedup factor.  Only rendered when latency
+    fields are present in the batch metadata (i.e. batches run after the scalability
+    logging was added).
+    """
+    latency_cols = ["strikenet_infer_ms", "analytic_strategy_ms", "speedup_factor"]
+    if df_runs[latency_cols].isnull().all().all():
+        print("  Skipping decision latency plot (no latency data in this batch).")
+        return
+
+    df_lat = df_runs.dropna(subset=latency_cols).copy()
+    if df_lat.empty:
+        print("  Skipping decision latency plot (all runs lack latency fields).")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    x = np.arange(len(df_lat))
+    width = 0.38
+
+    ax.bar(x - width / 2, df_lat["strikenet_infer_ms"], width,
+           label="StrikeNet inference (CPU)", alpha=0.85)
+    ax.bar(x + width / 2, df_lat["analytic_strategy_ms"], width,
+           label="Analytic search", alpha=0.85)
+
+    median_speedup = df_lat["speedup_factor"].median()
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"s{s}" for s in df_lat["seed"].astype(int)], rotation=45, fontsize=7)
+    ax.set_xlabel("Seed", fontsize=11)
+    ax.set_ylabel("Decision latency (ms, log scale)", fontsize=11)
+    ax.set_title(
+        f"Online Decision Latency: StrikeNet vs Analytic Search\n"
+        f"Median speedup: {median_speedup:.1f}×  (n={len(df_lat)} runs)",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=10)
+    ax.grid(True, which="both", axis="y", alpha=0.35)
+    fig.tight_layout()
+
+    out_path = output_dir / "decision_latency.png"
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+    print(f"  Saved decision latency plot to: {out_path}")
+
+
+def _scalability_section(df_runs) -> str:
+    """Return a markdown string for the scalability subsection of the report."""
+    lat_cols = ["strikenet_infer_ms", "analytic_strategy_ms", "speedup_factor"]
+    df_lat = df_runs.dropna(subset=lat_cols)
+    if df_lat.empty:
+        return (
+            "_Latency data not available in this batch "
+            "(re-run test_main.py to populate strikenet_infer_ms / analytic_strategy_ms fields)._"
+        )
+    med_net  = df_lat["strikenet_infer_ms"].median()
+    med_ana  = df_lat["analytic_strategy_ms"].median()
+    med_spd  = df_lat["speedup_factor"].median()
+    n        = len(df_lat)
+    return (
+        f"The core scalability claim is that StrikeNet amortises the expensive offline search into a "
+        f"cheap online forward pass. Across {n} runs with the CPU timing harness "
+        f"(30 warm-up-discarded repetitions, median reported):\n\n"
+        f"| Metric | Value |\n"
+        f"|--------|-------|\n"
+        f"| StrikeNet inference latency (CPU, median) | **{med_net:.3f} ms** |\n"
+        f"| Analytic search latency (n_angles=36, median) | **{med_ana:.1f} ms** |\n"
+        f"| Speedup factor (median) | **{med_spd:.1f}×** |\n\n"
+        f"The scaling curve `scalability_curve.png` (generated by "
+        f"`scripts/benchmark_scalability.py`) shows that analytic cost grows "
+        f"approximately linearly with angular resolution while network inference "
+        f"remains flat, providing the visual amortisation argument."
+    )
 
 
 def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
@@ -601,7 +683,7 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
 The NMPC striker agent was evaluated across **{len(df_runs)} distinct random seeds** (seeds 100 to 149) consisting of dynamic initial conditions, high-velocity target ball states, and complex wall-rebounding trajectories.
 * **Goal scoring success rate (Accuracy):** **{success_rate:.1f}%**
 * **Dynamic Convergence:** The combination of NMPC with a **Pursuit-Based Warm-Start** resulted in 100% solver convergence across all challenging initial heading orientations.
-* **Actuator Integrity:** Acceleration and steering inputs successfully respect boundary constraints ($|a| \\le 4.0\\text{{ m/s }}^2$ and $|\\delta| \\le 0.40\\text{{ rad }}$) without high-frequency chattering or instability.
+* **Actuator Integrity:** Acceleration and steering inputs successfully respect boundary constraints ($|a| \\le 2.0\\text{{ m/s }}^2$ and $|\\delta| \\le \\pi/4\\text{{ rad }}$) without high-frequency chattering or instability.
 
 ---
 
@@ -642,7 +724,12 @@ You can directly copy-paste this LaTeX table code into your research paper docum
 
 ## 5. Actuator Stability & Real-time Feasibility Analysis
 * **Control Chattering:** The mean absolute step-to-step changes in acceleration ($\\Delta a = {df_runs['chatter_acc'].mean():.4f}\\text{{ m/s }}^2$) and steering ($\\Delta \\delta = {df_runs['chatter_steer'].mean():.4f}\\text{{ rad }}$) confirm that the warm-started NMPC provides smooth control signals, which is highly beneficial for extending the lifespan of real mechanical servo-actuators.
-* **Computation Feasibility:** With a mean solve time of `{df_runs['avg_solve_ms'].mean():.2f} ms` and a maximum peak latency of `{df_runs['max_solve_ms'].max():.2f} ms`, the control loop comfortably satisfies real-time execution bounds (control period $\\Delta t = 50\\text{{ ms }}$).
+* **Computation Feasibility:** With a mean solve time of `{df_runs['avg_solve_ms'].mean():.2f} ms` and a maximum peak latency of `{df_runs['max_solve_ms'].max():.2f} ms`, the control loop comfortably satisfies real-time execution bounds (control period $\\Delta t = 100\\text{{ ms }}$).
+
+---
+
+## 6. Computational Scalability and Amortisation
+{_scalability_section(df_runs)}
 """
 
     report_path = output_dir / "research_summary.md"
@@ -689,6 +776,7 @@ def main():
     plot_phase_portrait(trajectories, output_dir)
     plot_solver_latency_evolution(trajectories, output_dir)
     plot_chattering_phase_portrait(trajectories, output_dir)
+    plot_decision_latency(df_runs, output_dir)
 
     # Print a beautiful ASCII summary
     success_rate = (df_runs["success"].sum() / len(df_runs)) * 100

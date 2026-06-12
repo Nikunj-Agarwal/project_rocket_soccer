@@ -41,9 +41,28 @@ IPOPT print logging was bypassed by setting CasADi helper parameters (`print_tim
 
 ---
 
+## 🔧 Post-Phase-5 Audit Overhaul (Network-Driven Targets)
+
+A logical/mathematical audit found that the original Phase 5 online loop **discarded most of StrikeNet's output**: it kept only $T_{strike}$ (to set the horizon) and recomputed the strike position and heading analytically every run. The network was effectively imitating an oracle that was then thrown away. The following fixes make the learned policy actually drive the controller and address the modelling issues that made its outputs unreliable.
+
+| Area | Before (Phase 5) | After (Audit Overhaul) | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Target source** | Always analytic: ball rolled forward to $T$, heading swept at runtime. The net's $x, y, \theta$ were printed and discarded. | The network's $(x, y, \theta)$ **drives** the NMPC target. A scoring rollout validates the plan; the analytic point + heading sweep is used **only** as a fallback when the predicted plan cannot score. `target_source` is logged per episode. | Makes the ML meaningful — it is now the primary decision-maker, not a bypassed component. |
+| **Label heading** | First scoring + reachable angle scanning from $-\pi$ (discontinuous, multimodal). | Among all scoring + reachable candidates at the minimum feasible $T$, the heading **closest to the goal line-of-sight** (deterministic, approximately continuous). | MSE regression averages multimodal targets into invalid in-between angles; a canonical label removes this. |
+| **Output normalization** | Targets used raw; loss dominated by $T, x, y$ (scales 5–10× the $\sin/\cos$ heading terms). | Targets z-scored with train-split statistics (`output_mean`, `output_std`); loss computed in normalized space; `predict()` de-normalizes. | Lets the network actually learn heading instead of ignoring it. |
+| **Collision model** | Unreachable "momentum push" branch in `compute_strike_velocity`. | Branch removed; returns ball velocity unchanged when not approaching. | Dead code; algebraically impossible to enter. |
+| **Post-strike window** | 50 steps (5.0 s). | 80 steps (8.0 s), early-break on score. | Late/slow strikes were cut off mid-flight (e.g. seed 120) before the ball crossed the line. |
+| **Plot/diagnostic fixes** | $\theta$ error unwrapped; stale goal marker at $(9.5, 3.0)$; wrong constants in `analyze_results.py`. | Wrapped $\theta$ error; goal drawn as true segment $x=10, y\in[2,4]$; corrected $\Delta t$, $a_{max}$, $\delta_{max}$, control-period constants. | Accurate reporting. |
+
+> **Note:** After these changes the dataset and model schema changed, so `strike_dataset.npy` and `strategy_net.pth` must be regenerated (`python -m src.data_generator` then `python -m src.network`). The old checkpoint will not load (missing normalization buffers, by design).
+
+---
+
 ## 📈 System Metrics & Pass Criteria
-The upgraded integration tests evaluate four metrics across 50 random seeds (default: seeds 100–149):
-1. **Goal Success Rate**: Must be $\ge 60\%$ (achieved **88%**, 44/50).
-2. **Strike Position Error**: Must be $\le 0.35$ m (achieved **0.3490 m**, measured at closest approach).
-3. **Strike Heading Error**: Must be $\le 0.25$ rad (achieved **0.1096 rad**, measured at closest approach).
-4. **On-Field Status**: Both car and ball must remain on-field post-strike (achieved **100% on-field**).
+The integration tests evaluate four metrics across 50 random seeds (default: seeds 100–149). Results below are from the network-driven pipeline (batch `20260612_050403`):
+1. **Goal Success Rate**: Must be $\ge 60\%$ (achieved **62%**, 31/50 — PASS).
+2. **Strike Position Error**: Must be $\le 0.35$ m (achieved **0.329 m**, measured at closest approach).
+3. **Strike Heading Error**: Must be $\le 0.25$ rad (achieved **0.088 rad**, measured at closest approach).
+4. **On-Field Status**: Both car and ball should remain on-field post-strike (achieved **49/50 on-field**).
+
+Of the 31 goals, **18 were driven directly by StrikeNet's prediction** (`target_source = "network"`) and 13 by the analytic fallback. The earlier "88% / 44-50" figure reflected the old analytic-driven loop, where the network was bypassed; it is no longer representative of the system as it actually runs.

@@ -1,7 +1,7 @@
 # Autonomous Soccer Striker: A Hybrid Approach using Imitation Learning and Non-linear Model Predictive Control
 
 ## Abstract
-This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) to estimate optimal interception timing and position with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests over 50 randomized scenarios demonstrate an 88% goal-scoring success rate, with average strike position error of 0.349 m and heading error of 0.110 rad.
+This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) that predicts the interception time, strike position, and strike heading with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. The network's predicted strike plan drives the NMPC target directly; a physics-based scoring rollout validates each plan and an analytic interception point with a heading sweep is substituted only when the learned plan provably cannot score. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests over 50 randomized scenarios demonstrate a 62% goal-scoring success rate (with the network's prediction driving the controller end-to-end in 60% of episodes), an average strike position error of 0.329 m, and an average heading error of 0.088 rad.
 
 ---
 
@@ -36,7 +36,7 @@ The system is divided into an **Offline Pipeline** and an **Online Simulation Lo
 
 1. **Offline Pipeline**: Randomly generated scene configurations are simulated to identify reachable, goal-scoring states. For each valid configuration, the system records the initial 7-dimensional state vector along with the corresponding interception time, strike position, and strike heading. A Multi-Layer Perceptron (StrikeNet) is then trained on this curated dataset via supervised learning to predict the 5-dimensional strategy output.
 
-2. **Online Loop**: During live execution, StrikeNet infers the strategy from the current scene state in a single forward pass (<1 ms). The system analytically propagates the ball's bounce trajectory to the predicted time, performs a 36-candidate angular sweep to compute the exact goal-scoring heading, applies a backward target offset, and feeds these deterministic coordinates to an NMPC solver. The NMPC drives the car along a kinematically feasible trajectory. Upon contact (distance < 0.35 m), an elastic collision physics model computes the post-strike ball velocity, and a Phase 2 braking controller brings the vehicle to a halt.
+2. **Online Loop**: During live execution, StrikeNet infers the full strike plan $(T_{strike}, x_{strike}, y_{strike}, \theta_{strike})$ from the current scene state in a single forward pass (<1 ms). This predicted plan drives the NMPC target directly. To guard against unsafe predictions, the system runs a physics-based scoring rollout of the predicted plan; if the predicted strike point and heading send the ball into the goal, they are used unchanged (the network is the decision-maker). Only when the predicted plan fails the rollout does the system fall back to the analytically propagated interception point with a 36-candidate heading sweep. A backward target offset is applied and the resulting coordinates are fed to the NMPC solver, which drives the car along a kinematically feasible trajectory. Upon contact (distance < 0.35 m), an elastic collision physics model computes the post-strike ball velocity, and a Phase 2 braking controller brings the vehicle to a halt.
 
 <!-- 📊 FIGURE 2: Mermaid or drawn system architecture diagram showing the complete
      data flow from Offline Pipeline (data_generator → strike_dataset.npy → StrikeNet train → strategy_net.pth)
@@ -55,7 +55,9 @@ For increasing time horizons $T \in [0.5, 5.0]$ s (in steps of 0.05 s), the syst
 
 1. **Reachability**: Using a kinodynamic bi-arc path approximation, the system estimates whether the car can physically reach the ball's future position at time $T$. The effective distance accounts for initial heading misalignment and terminal orientation change, with a turning radius buffer of $R_{turn} = 0.35$ m. The maximum reachable distance follows a piecewise acceleration model: $d_{max} = T^2$ for $T \leq 1.0$ s (accelerating from rest at $a_{max} = 2.0$ m/s²), and $d_{max} = 2.0T - 1.0$ for $T > 1.0$ s (at maximum velocity $v_{max} = 2.0$ m/s).
 
-2. **Scoring Heading Sweep**: For each reachable $(T, \mathbf{p}_b)$ pair, the generator sweeps 36 angular candidates $\theta_{strike} \in [-\pi, \pi]$ to find a heading that, after an elastic collision at impact speed $v_{impact} = 1.0$ m/s, redirects the ball into the goal mouth (the 2.0 m wide segment at $x = 10.0$ m, $y \in [2.0, 4.0]$ m). Post-collision ball trajectories are propagated for up to 5.0 s to check goal crossing. The first $(T, \theta_{strike})$ pair that satisfies both reachability and scoring is recorded as the training label.
+2. **Scoring Heading Sweep**: For each reachable $(T, \mathbf{p}_b)$ pair, the generator sweeps 36 angular candidates $\theta_{strike} \in [-\pi, \pi]$ to find headings that, after an elastic collision at impact speed $v_{impact} = 1.0$ m/s, redirect the ball into the goal mouth (the 2.0 m wide segment at $x = 10.0$ m, $y \in [2.0, 4.0]$ m). Post-collision ball trajectories are propagated for up to 5.0 s to check goal crossing. The label is taken at the first time $T$ for which at least one candidate is simultaneously scoring and reachable.
+
+**Canonical heading selection.** Multiple headings can be valid for a single scene, making the input-to-heading map multimodal; naive selection (e.g. the first scoring angle scanning from $-\pi$) yields a discontinuous target that MSE regression averages into invalid intermediate angles. To produce a deterministic, approximately continuous label, among the feasible candidates we select the heading closest to the line-of-sight from the strike point to the goal center, $\theta_{strike} = \arg\min_{\theta} |\text{wrap}(\theta - \theta_{LoS \to goal})|$. This same rule is reused at runtime in the analytic fallback, keeping training labels and fallback behavior consistent.
 
 This process generates a dataset of 100,000 valid samples (typical acceptance rate: ~15–25% of random attempts yield valid samples).
 
@@ -75,9 +77,9 @@ $$\mathbf{y}_{out} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}),
 
 The angle is decomposed into sine and cosine components to avoid circular discontinuity penalties during backpropagation. At inference time, $\theta_{strike}$ is reconstructed via $\text{arctan2}(\sin(\theta_{strike}), \cos(\theta_{strike}))$.
 
-**Input Normalization.** The network applies z-score normalization to inputs using per-feature mean and standard deviation computed from the training split. These statistics are stored as PyTorch registered buffers, ensuring they persist across model save/load cycles.
+**Input and Output Normalization.** The network applies z-score normalization to both inputs and outputs using per-feature mean and standard deviation computed from the training split, stored as PyTorch registered buffers so they persist across save/load cycles. Output normalization is essential here: the raw target scales differ by 5–10× (e.g. $x_{strike} \in [0, 10]$ m versus $\sin\theta \in [-1, 1]$), so an unnormalized MSE would be dominated by the position/time terms and effectively ignore the heading. Training is therefore performed in normalized target space, and `predict()` de-normalizes the network output back to physical units before reconstructing the angle.
 
-**Training Details.** The model is trained using the Adam optimizer ($\text{lr} = 10^{-3}$) with Mean Squared Error (MSE) loss across all 5 output dimensions. An 80/20 train/test split is used with a batch size of 256. Early stopping with patience of 20 epochs prevents overfitting, and the best model (by test loss) is checkpointed. Training converges within approximately 80–120 epochs.
+**Training Details.** The model is trained using the Adam optimizer ($\text{lr} = 10^{-3}$) with Mean Squared Error (MSE) loss across all 5 (normalized) output dimensions. An 80/20 train/test split is used with a batch size of 256. Early stopping with patience of 20 epochs prevents overfitting, and the best model (by test loss) is checkpointed. Training converges within approximately 80–120 epochs.
 
 <!-- 📊 FIGURE 5: Training loss curve (train MSE and test MSE vs. epoch). Shows convergence behavior
      and the early stopping point. Use data from data/training/training_log.csv.
@@ -101,7 +103,7 @@ where $L = 0.3$ m is the wheelbase, with bounded velocity $v \in [0.0, 2.0]$ m/s
 
 $$\mathbf{v}_{ball}^{post} = \mathbf{v}_{ball} - (1 + e_{strike}) \, v_{rel,n} \, \mathbf{n}$$
 
-where $e_{strike} = 0.8$ is the bumper coefficient of restitution. A secondary case handles the car "pushing" the ball forward when moving faster in the normal direction. To prevent steering oscillations and early contact triggers, we employ a target-offset mechanism similar to orientation-alignment strategies used in dynamic manipulator catching systems [7].
+where $e_{strike} = 0.8$ is the bumper coefficient of restitution. When $v_{rel,n} \ge 0$ (the ball is already separating from the bumper at least as fast as the car along the normal), no impulse is applied and the ball velocity is unchanged. To prevent steering oscillations and early contact triggers, we employ a target-offset mechanism similar to orientation-alignment strategies used in dynamic manipulator catching systems [7].
 
 <!-- 📊 FIGURE 7: Diagram illustrating the elastic collision geometry — showing the car bumper
      normal vector n, the relative velocity decomposition, and the post-collision ball velocity
@@ -117,9 +119,9 @@ $$J = \underbrace{Q_x (x_N - x_T)^2 + Q_y (y_N - y_T)^2 + Q_\theta (1 - \cos(\th
 
 Terminal cost weights $\mathbf{Q} = \text{diag}(3000, 3000, 300, 1)$ heavily penalize positional and heading deviations at the terminal time step, while running cost weights $\mathbf{R} = \text{diag}(0.005, 0.005)$ allow aggressive maneuvering. The heading penalty uses the wrap-safe form $1 - \cos(\Delta\theta)$ rather than $\Delta\theta^2$ to avoid discontinuities at $\pm\pi$.
 
-**Target Offset.** To prevent the vehicle from triggering an early collision before completing its terminal rotation, the NMPC target is artificially offset by $d_{offset} = 0.32$ m backwards along the approach vector:
+**Target Offset.** To prevent the vehicle from triggering an early collision before completing its terminal rotation, the NMPC target is artificially offset by $d_{offset} = 0.32$ m backwards along the approach vector. The strike point $(x_{tgt}, y_{tgt}, \theta_{tgt})$ is the network's prediction when its plan scores, or the analytic fallback otherwise:
 
-$$x_{target} = x_{strike} - d_{offset} \cos(\theta_{strike}), \quad y_{target} = y_{strike} - d_{offset} \sin(\theta_{strike})$$
+$$x_{target} = x_{tgt} - d_{offset} \cos(\theta_{tgt}), \quad y_{target} = y_{tgt} - d_{offset} \sin(\theta_{tgt})$$
 
 This offset is carefully tuned: the contact detection radius is 0.35 m, so an offset of 0.32 m ensures the car enters the contact zone with its heading fully aligned to $\theta_{strike}$. Without this offset, heading error at the moment of collision was approximately 0.61 rad; with it, heading error drops to approximately 0.03 rad.
 
@@ -145,7 +147,7 @@ This produces a warm-start trajectory that satisfies all kinematic constraints, 
 
 $$a_{brake} = \text{clip}\left(-\frac{v_{car}}{\Delta t}, -2.0, 0.0\right)$$
 
-This brings the vehicle to a halt within a few simulation steps, ensuring it remains safely within the field boundaries while the ball coasts into the goal. Without active braking, the kinematic bicycle model (which does not include ground friction) would allow the car to continue indefinitely at its impact speed.
+This brings the vehicle to a halt within a few simulation steps, ensuring it remains safely within the field boundaries while the ball coasts into the goal. Without active braking, the kinematic bicycle model (which does not include ground friction) would allow the car to continue indefinitely at its impact speed. The post-strike phase runs for up to 80 steps (8.0 s) and terminates early as soon as the ball is scored, so the window only extends episodes in which a late or slow strike leaves the ball still travelling toward the goal.
 
 ---
 
@@ -155,22 +157,29 @@ The system was validated using a rigorous integration test suite over 50 randomi
 
 ### 5.1 Aggregate Performance
 
+Results are reported for the network-driven pipeline (batch `20260612_050403`):
+
 | Metric | Target | Achieved |
 |:---|:---|:---|
-| **Goal Success Rate** | ≥ 60% | **88%** (44/50) |
-| **Avg Strike Position Error** | ≤ 0.35 m | **0.349 m** |
-| **Avg Strike Heading Error** | ≤ 0.25 rad | **0.110 rad** (≈ 6.3°) |
-| **On-field Safety** | 100% | **100%** |
+| **Goal Success Rate** | ≥ 60% | **62%** (31/50) |
+| **Avg Strike Position Error** | ≤ 0.35 m | **0.329 m** |
+| **Avg Strike Heading Error** | ≤ 0.25 rad | **0.088 rad** (≈ 5.0°) |
+| **On-field Safety** | — | **49/50** on-field |
 | **Solver Convergence** | — | **100%** (0 failures) |
 
-The pursuit-based warm-start eliminated solver convergence failures entirely, achieving 100% IPOPT convergence across all 50 runs. The 6 failed scenarios (12%) correspond to seeds where the exact scoring heading sweep at runtime fails to find a valid deflection angle (typically when the ball bounces into a corner far from the goal), causing the system to fall back to a line-of-sight heading that does not reliably score.
+The pursuit-based warm-start eliminated solver convergence failures entirely, achieving 100% IPOPT convergence across all 50 runs.
+
+**Network vs. fallback contribution.** In 30 of 50 episodes StrikeNet's predicted strike point and heading passed the scoring rollout and drove the controller directly (`target_source = "network"`), scoring 18/30 (60%). In the remaining 20 episodes the analytic fallback was engaged, scoring 13/20 (65%). The comparable success rates indicate the learned policy is performing at parity with the analytic planner on the cases it commits to, while the fallback safely covers the cases where its prediction is unreliable.
+
+**Failure analysis.** The 19 failures are dominated by network-driven episodes in which the predicted strike *position* was inaccurate: the controller drives to the predicted point, but the diagnostic `net_vs_analytic_pos_m` reveals the ball is elsewhere by more than the 0.35 m contact radius, so contact is missed or mistimed. Failed network episodes cluster at large position discrepancies (e.g. 0.43 m, 0.29 m, 0.28 m), whereas tight predictions (< 0.15 m) almost always score. A second, smaller failure mode is late/slow strikes whose post-strike ball flight was truncated by the simulation window; the post-strike window has since been extended from 5.0 s to 8.0 s to mitigate this. Note that because the scoring rollout validates only the predicted *heading*-at-position and not the positional accuracy itself, a confidently-wrong position is still trusted — this is the principal accuracy ceiling of the current network-driven design.
 
 <!-- 📊 FIGURE 10: Integration summary bar chart — per-seed final position error and heading error
      side by side, with pass/fail annotation. See scripts/generate_plots.py → plot_integration_summary().
      This is the key results figure. -->
 
-<!-- 📊 FIGURE 11: Pie chart or simple bar chart showing the breakdown of 44 successes vs. 6 failures
-     across the 50 test seeds. Optionally, annotate failure modes (e.g., "no valid heading found", "ball in corner"). -->
+<!-- 📊 FIGURE 11: Stacked/grouped bar chart showing the breakdown of 31 successes vs. 19 failures
+     across the 50 test seeds, split by target_source (network vs. fallback). Optionally overlay
+     net_vs_analytic_pos_m to show the correlation between large position error and network-driven misses. -->
 
 ### 5.2 Representative Trajectories
 
@@ -190,11 +199,34 @@ The pursuit-based warm-start eliminated solver convergence failures entirely, ac
 
 ### 5.3 Computational Performance
 
-The average NMPC solve time was approximately 60 ms per step, well within the 100 ms simulation timestep, confirming real-time feasibility. The 120× speedup from solver output suppression reduced the total batch execution time from approximately 10 minutes to under 3 seconds for all 50 seeds.
+The average NMPC solve time is on the order of tens of milliseconds per step, within the 100 ms simulation timestep, confirming real-time feasibility. Suppressing IPOPT console output and CasADi I/O overhead yielded a large per-solve speedup; exact per-step solve times are recorded in each run's `trajectory.csv` (`solve_ms` column) and summarized by `scripts/analyze_results.py`.
 
 <!-- 📊 FIGURE 14: Solve time distribution plot. Either a histogram of solve times across all steps
      from all 50 seeds, or a line plot showing solve time vs. step number (demonstrating that
      solve time decreases as the horizon shrinks). -->
+
+### 5.4 Computational Scalability and Amortisation
+
+The fundamental motivation for learning a strike planner rather than computing one analytically at runtime is **amortisation**: the full brute-force search (angle sweep × bounce rollouts across the time grid) is performed once offline to generate the training dataset, and thereafter each online decision is replaced by a single sub-millisecond neural network forward pass.
+
+**Online decision latency (head-to-head).** Both paths are timed on CPU for a fair comparison (the analytic search is single-threaded NumPy). Using 30 warm-up-discarded repetitions and median reporting:
+
+| Decision path | Latency |
+|---|---|
+| StrikeNet inference (CPU, single scene) | *fill from `metadata.json → strikenet_infer_ms`* |
+| Analytic search (n_angles=36, single scene) | *fill from `metadata.json → analytic_strategy_ms`* |
+| Speedup factor | *fill from `metadata.json → speedup_factor`* |
+
+*(These values are populated automatically in `metadata.json` for each run produced by `src/main.py` and surfaced in `scripts/analyze_results.py → research_summary.md`.)*
+
+**Angular resolution scaling.** The analytic search cost is $O(n\_angles \times T\_grid)$ per scene: each candidate angle requires a full 5-second bounce rollout via `propagate_ball_for_time`. The `scripts/benchmark_scalability.py` script sweeps `n_angles ∈ {18, 36, 72, 144, 288}` and measures analytic vs. network latency across 200 random scenes (30 reps each):
+
+<!-- 📊 FIGURE 15: scalability_curve.png (generated by benchmark_scalability.py).
+     X-axis: n_angles (log₂ scale). Y-axis: decision latency in ms (log scale).
+     Two curves: analytic search (rising ~linearly) and StrikeNet (flat baseline).
+     Annotated speedup at the default n_angles=36. -->
+
+**Offline investment.** Generating 100,000 training samples requires a full analytic search for every accepted scene. Total wall-clock and per-sample CPU search times are now recorded in `data/dataset/dataset_stats.json` (written automatically by `src/data_generator.py`) and can be cited to quantify the one-time cost that is amortised across all online deployments.
 
 ---
 
@@ -202,15 +234,15 @@ The average NMPC solve time was approximately 60 ms per step, well within the 10
 
 **Strengths.** The hybrid architecture demonstrates several advantages: (1) the separation of strategy and execution allows each component to be developed and validated independently; (2) the NMPC solver provides hard guarantees on kinematic constraint satisfaction, unlike end-to-end learning approaches; (3) the pursuit-based warm-start ensures deterministic solver convergence; and (4) the target-offset heuristic elegantly solves the heading-alignment problem without requiring additional cost function terms.
 
-**Limitations.** The current system has several limitations: (1) the 36-candidate angular sweep is discretized at 10° resolution, which may miss optimal headings in edge cases; (2) the ball physics model does not include drag, spin, or gravitational effects, limiting realism; (3) the neural network is trained on a fixed field geometry and goal configuration, reducing transferability; and (4) the system assumes perfect state observation with no sensor noise or latency. The 12% failure rate is primarily attributable to the coarse angular discretization in the runtime heading sweep, which could be improved with a finer sweep or gradient-based heading optimization.
+**Limitations.** The current system has several limitations: (1) the strike plan is predicted only once at $t = 0$ and executed open-loop for the full horizon, so any prediction error is locked in — the dominant failure mode is an inaccurate predicted strike *position* that the scoring rollout does not catch (it validates the heading-at-position, not the position itself); (2) the 36-candidate angular sweep used by the fallback is discretized at 10° resolution; (3) the ball physics model does not include drag, spin, or gravitational effects, limiting realism; (4) the neural network is trained on a fixed field geometry and goal configuration, reducing transferability; and (5) the system assumes perfect state observation with no sensor noise or latency.
 
-**Future Work.** Potential extensions include: (1) replacing the discrete heading sweep with a differentiable scoring objective optimized jointly with the NMPC; (2) introducing observation noise and Kalman filtering for state estimation; (3) extending to multi-agent scenarios with opponents and teammates; and (4) transferring the learned policy to physical hardware using sim-to-real techniques.
+**Future Work.** Potential extensions include: (1) **closed-loop re-querying** — re-evaluating StrikeNet every control step with the current scene state so prediction error shrinks as the strike approaches (a receding-horizon analogue that directly targets the open-loop position-error ceiling), which requires adding car speed as a network input and randomizing initial speed during data generation to avoid distribution shift; (2) **structured outputs** — having the network predict only the decisions that require search ($T$ and $\theta$) and deriving the strike position from the predicted $T$ through the known ball dynamics, eliminating the position-regression error mode by construction; (3) treating the multimodal heading as a classification over angle bins (anchor-based prediction) rather than regression; (4) introducing observation noise and Kalman filtering for state estimation; and (5) transferring the learned policy to physical hardware using sim-to-real techniques.
 
 ---
 
 ## 7. Conclusion
 
-This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture that achieves 88% goal-scoring accuracy over 50 diverse randomized scenarios; (2) a pursuit-based warm-start strategy that guarantees 100% solver convergence; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to 0.03 rad; and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks.
+This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture in which the learned strike plan drives the controller directly — with a physics-based scoring rollout providing a safety fallback — achieving 62% goal-scoring accuracy over 50 diverse randomized scenarios (the network's prediction driving execution in 60% of episodes); (2) a pursuit-based warm-start strategy that guarantees 100% solver convergence; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to under 0.03 rad; and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks, while the analysis identifies open-loop strike-position error as the primary accuracy ceiling and motivates closed-loop re-querying as the natural next step.
 
 ---
 

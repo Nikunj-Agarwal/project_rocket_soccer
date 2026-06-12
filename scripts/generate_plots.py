@@ -33,6 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.ball_physics import DEFAULT_FIELD_H, DEFAULT_FIELD_W
+from src.goal import Goal
 from src.data_layout import (
     BATCH_LOG,
     INTEGRATION_TESTS_DIR,
@@ -48,7 +49,7 @@ from src.data_layout import (
     plots_seed_dir,
 )
 
-GOAL_POS = (9.5, 3.0)
+GOAL = Goal()  # true goal mouth: x = 10, y in [2, 4]
 FIELD_W = DEFAULT_FIELD_W
 FIELD_H = DEFAULT_FIELD_H
 
@@ -60,8 +61,8 @@ def _draw_field(ax, title: str = "") -> None:
     ax.add_patch(
         plt.Rectangle((0, 0), FIELD_W, FIELD_H, fill=True, facecolor="#2e7d32", edgecolor="white", lw=2)
     )
-    gx, gy = GOAL_POS
-    ax.plot(gx, gy, marker="x", color="gold", markersize=12, markeredgewidth=2, zorder=5)
+    ax.plot([GOAL.x, GOAL.x], [GOAL.y_min, GOAL.y_max], color="gold", lw=4, zorder=5)
+    ax.plot([GOAL.x, GOAL.x], [GOAL.y_min, GOAL.y_max], marker="o", ls="none", color="white", markersize=5, zorder=6)
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     if title:
@@ -197,9 +198,12 @@ def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, 
         inputs = row[:7]
         gt = row[7:11]
         pred = model.predict(inputs)
+        errs = np.abs(pred - gt)
+        # Heading error must be wrapped to [-pi, pi] before taking |.|
+        errs[3] = np.abs(np.arctan2(np.sin(pred[3] - gt[3]), np.cos(pred[3] - gt[3])))
         ax.bar(
             ["T", "x", "y", "θ"],
-            np.abs(pred - gt),
+            errs,
             color=["#5c6bc0", "#26a69a", "#26a69a", "#ff7043"],
         )
         ax.set_title(f"Dataset idx {i}", fontsize=9)
@@ -208,6 +212,103 @@ def plot_strikenet_samples(dataset_path: Path, model_path: Path, out_dir: Path, 
     fig.suptitle("StrikeNet vs Ground Truth (random dataset samples)", fontsize=12)
     fig.tight_layout()
     path = out_dir / "strikenet_sample_errors.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return str(path)
+
+
+def plot_dataset_distribution(dataset_path: Path, out_dir: Path) -> str | None:
+    if not dataset_path.is_file():
+        return None
+    data = np.load(dataset_path)
+    if len(data) == 0:
+        return None
+        
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    axes = axes.flatten()
+    
+    # data cols are roughly: [b_x, b_y, b_vx, b_vy, c_x, c_y, c_theta, T, x, y, theta, cost]
+    # T, x, y, theta are indices 7, 8, 9, 10
+    labels = ["T_strike (s)", "x_strike (m)", "y_strike (m)", "theta_strike (rad)"]
+    colors = ["#5c6bc0", "#26a69a", "#ab47bc", "#ff7043"]
+    
+    for i in range(4):
+        idx = 7 + i
+        if idx < data.shape[1]:
+            axes[i].hist(data[:, idx], bins=50, color=colors[i], alpha=0.7, edgecolor='white')
+            axes[i].set_title(f"Distribution of {labels[i]}")
+            axes[i].grid(True, alpha=0.3)
+            
+    fig.suptitle(f"StrikeNet Dataset Distribution ({len(data)} valid samples)", fontsize=14)
+    fig.tight_layout()
+    path = out_dir / "dataset_distribution.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return str(path)
+
+
+def plot_global_batch_progress(out_dir: Path) -> str | None:
+    batches = list_integration_batches()
+    if not batches:
+        return None
+        
+    # Sort from oldest to newest
+    batches = sorted(batches, key=lambda b: b.name)
+    
+    batch_names = []
+    success_rates = []
+    mean_pos_errs = []
+    
+    for b in batches:
+        seed_runs = list(iter_integration_seed_runs(b))
+        if not seed_runs:
+            continue
+            
+        successes = 0
+        pos_errs = []
+        for seed, run_dir in seed_runs:
+            csv_path = run_dir / TRAJECTORY_CSV
+            meta_path = run_dir / RUN_METADATA
+            
+            if csv_path.is_file():
+                df = pd.read_csv(csv_path)
+                pos_errs.append(float(df["pos_err"].iloc[-1]))
+            
+            if meta_path.is_file():
+                with open(meta_path, encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("success", False):
+                    successes += 1
+                    
+        if len(seed_runs) > 0 and len(pos_errs) > 0:
+            batch_names.append(b.name[4:8] + "_" + b.name[9:13])  # Format MMDD_HHMM
+            success_rates.append(successes / len(seed_runs) * 100.0)
+            mean_pos_errs.append(np.mean(pos_errs))
+            
+    if not batch_names:
+        return None
+        
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+    
+    # Success rate on primary y-axis
+    ax1.plot(batch_names, success_rates, marker="o", color="#2e7d32", lw=2, label="Success Rate (%)")
+    ax1.set_xlabel("Integration Test Batch (MMDD_HHMM)")
+    ax1.set_ylabel("Success Rate (%)", color="#2e7d32")
+    ax1.tick_params(axis="y", labelcolor="#2e7d32")
+    ax1.set_ylim(-5, 105)
+    ax1.grid(True, alpha=0.3)
+    ax1.tick_params(axis='x', rotation=45)
+    
+    # Mean error on secondary y-axis
+    ax2 = ax1.twinx()
+    ax2.plot(batch_names, mean_pos_errs, marker="s", color="#c62828", lw=2, ls="--", label="Mean Pos Error (m)")
+    ax2.set_ylabel("Mean Final Pos Error (m)", color="#c62828")
+    ax2.tick_params(axis="y", labelcolor="#c62828")
+    
+    fig.suptitle("Global Pipeline Progress across Integration Test Batches", fontsize=14)
+    fig.tight_layout()
+    
+    path = out_dir / "inter_batch_progress.png"
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return str(path)
@@ -298,6 +399,14 @@ def main() -> int:
     if sample_plot:
         saved.append(sample_plot)
 
+    dist_plot = plot_dataset_distribution(Path(args.dataset), global_dir)
+    if dist_plot:
+        saved.append(dist_plot)
+
+    prog_plot = plot_global_batch_progress(global_dir)
+    if prog_plot:
+        saved.append(prog_plot)
+
     batch_id, batch_dir, seed_runs = resolve_batch(args.batch)
     if batch_id and batch_dir is not None:
         plot_batch_root = plots_batch_dir(batch_id)
@@ -305,7 +414,8 @@ def main() -> int:
         if summary:
             saved.append(summary)
 
-        for seed, run_dir in seed_runs:
+        from tqdm import tqdm
+        for seed, run_dir in tqdm(seed_runs, desc="Generating plots"):
             csv_path = run_dir / TRAJECTORY_CSV
             if not csv_path.is_file():
                 continue
@@ -331,6 +441,8 @@ def main() -> int:
         "|------|-------------|",
         "| `global/training_curve.png` | StrikeNet train/test MSE from `data/training/training_log.csv` |",
         "| `global/strikenet_sample_errors.png` | Model vs dataset labels (8 random samples) |",
+        "| `global/dataset_distribution.png` | Histograms of generated training targets (T, x, y, theta) |",
+        "| `global/inter_batch_progress.png` | Success rate and mean errors compared across all runs |",
         "",
         "## `integration/<batch_id>/`",
         "",

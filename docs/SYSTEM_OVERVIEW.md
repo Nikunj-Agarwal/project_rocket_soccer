@@ -8,27 +8,28 @@ A **robot soccer striker** must intercept a **moving, bouncing ball** on a recta
 ## Architecture
 
 The system consists of two major components:
-1. **Offline Pipeline (Imitation Learning)**: Collects reachability and scoring data, trains a multi-layer perceptron (StrikeNet) to predict when and where to meet the ball.
-2. **Online Simulation Loop**: Uses StrikeNet to estimate timing, propagates the ball trajectory, sweeps for a scoring heading, applies a target offset, and runs a shrinking-horizon NMPC loop.
+1. **Offline Pipeline (Imitation Learning)**: Collects reachability and scoring data, trains a multi-layer perceptron (StrikeNet) to predict *when, where, and at what heading* to meet the ball.
+2. **Online Simulation Loop**: Queries StrikeNet for the full strike plan $(T, x, y, \theta)$, **uses that plan directly** to build the NMPC target (validated by a scoring rollout, with an analytic fallback only when the predicted plan cannot score), applies a backward target offset, and runs a shrinking-horizon NMPC loop.
 
 ```mermaid
 flowchart LR
   subgraph offline [Offline Pipeline]
     DG[data_generator] --> DS[(strike_dataset.npy)]
-    DS --> SN[StrikeNet train]
+    DS --> SN[StrikeNet train, z-scored I/O]
     SN --> M[(strategy_net.pth)]
   end
 
   subgraph online [Online Simulation Loop]
-    M --> Pred[StrikeNet predict]
-    Pred --> Bounce[propagate_ball_for_time]
-    Bounce --> ThetaSweep[Scoring Heading Sweep]
-    ThetaSweep --> Offset[Apply 0.32m Offset]
+    M --> Pred[StrikeNet predict T,x,y,theta]
+    Pred --> Check{Predicted plan scores?}
+    Check -- Yes --> Offset[Apply 0.32m Offset]
+    Check -- No --> FB[Analytic pos + heading sweep]
+    FB --> Offset
     Offset --> MPC[InterceptionMPC]
     MPC --> World[World.step]
     World --> Collision{Collision?}
     Collision -- No --> MPC
-    Collision -- Yes (Phase 2) --> Brake[Active Braking & Ball Flight]
+    Collision -- "Yes (Phase 2)" --> Brake[Active Braking & Ball Flight]
     Brake --> GoalCheck{Scored?}
   end
 ```
@@ -42,7 +43,7 @@ flowchart LR
 | **Simulation** | `src/simulator.py` — **World** | Updates car (RK4 integration) and ball (wall bounce and bumper collision). |
 | **Physics** | `src/ball_physics.py` | Implements shared wall-bounce physics and car-ball elastic collision dynamics. |
 | **Goal** | `src/goal.py` | Models the goal mouth geometry and checks crossing segments for scores. |
-| **Orchestration** | `src/main.py` | Integrates components: queries StrikeNet, resolves scoring heading, runs NMPC and post-strike phases. |
+| **Orchestration** | `src/main.py` | Integrates components: queries StrikeNet, builds the strike target from the prediction (with scoring-validated analytic fallback), runs NMPC and post-strike phases. |
 | **Layout** | `src/data_layout.py` | Canonical paths for training logs, dataset, batches, and plots. |
 
 ---
@@ -54,7 +55,7 @@ $$\mathbf{x}_{in} = [x_{ball}, y_{ball}, v_{x,ball}, v_{y,ball}, x_{car}, y_{car
 
 ### 2. StrikeNet Output (5-D)
 $$\mathbf{y}_{out} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
-*At runtime, $\theta_{strike}$ is reconstructed via `arctan2`.*
+*Inputs and outputs are both z-scored (statistics stored as registered buffers). `predict()` de-normalizes the output to physical units, then reconstructs $\theta_{strike}$ via `arctan2`.*
 
 ### 3. Car State (4-D Kinematic Bicycle)
 $$\mathbf{q}_{car} = [x, y, \theta, v]^T$$

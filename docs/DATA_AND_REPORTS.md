@@ -109,7 +109,9 @@ python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 * `T_final_s` (float): Predicted interception time.
 * `ball_restitution` (float): Wall coefficient of restitution.
 * `field_size_m` (list of float): `[W, H]`.
-* `strike_target` (list of float): `[x_target, y_target, theta_target]` containing the bounce-correct offset target.
+* `strike_target` (list of float): `[x_target, y_target, theta_target]` — the chosen strike point and heading (from StrikeNet when `target_source == "network"`, else from the analytic fallback).
+* `target_source` (str): `"network"` if StrikeNet's predicted strike point/heading passed the scoring rollout and was used directly, or `"fallback"` if the analytic strike point + heading sweep was substituted.
+* `net_vs_analytic_pos_m` (float): Distance between StrikeNet's predicted strike position and the analytically propagated ball position at `T_final`. A diagnostic for how accurate the network's spatial prediction was (larger values correlate with network-driven misses).
 * `scored` (bool): `True` if ball crossed the goal line.
 * `ball_struck` (bool): `True` if collision occurred.
 * `strike_step` (int): The step index where collision occurred.

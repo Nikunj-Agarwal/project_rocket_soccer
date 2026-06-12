@@ -9,11 +9,12 @@ import argparse
 import os
 import sys
 import numpy as np
-import torch
 import logging
 import json
 import subprocess
 import pandas as pd
+import multiprocessing
+import concurrent.futures
 
 # Force non-interactive matplotlib backend BEFORE importing anything else
 import matplotlib
@@ -27,37 +28,16 @@ from src.ball_physics import (
     DEFAULT_BALL_RESTITUTION,
     DEFAULT_FIELD_H,
     DEFAULT_FIELD_W,
-    propagate_ball_for_time,
 )
 from src.data_layout import (
     BATCH_LOG,
     new_integration_batch,
     integration_seed_run,
 )
-from src.main import run_simulation
 
 # Default batch: 50 seeds for a comprehensive evaluation
 DEFAULT_INTEGRATION_SEEDS = list(range(100, 150))
 
-
-def check_bounce_target_consistency(
-    ball_start: np.ndarray,
-    ball_vel: np.ndarray,
-    T_final: float,
-    expected_pos: np.ndarray,
-    tol: float = 1e-4,
-) -> bool:
-    """Strike target must match shared bounce integrator."""
-    pos, _ = propagate_ball_for_time(
-        ball_start,
-        ball_vel,
-        T_final,
-        dt=DEFAULT_BALL_DT,
-        field_w=DEFAULT_FIELD_W,
-        field_h=DEFAULT_FIELD_H,
-        restitution=DEFAULT_BALL_RESTITUTION,
-    )
-    return np.linalg.norm(pos - expected_pos) <= tol
 
 def setup_logging(batch_dir: str) -> logging.Logger:
     """Create a logger that writes to both batch.log and stdout."""
@@ -74,15 +54,122 @@ def setup_logging(batch_dir: str) -> logging.Logger:
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s"))
 
     # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(message)s"))
+    import logging as logging_module
+    class TqdmLoggingHandler(logging_module.Handler):
+        def __init__(self, level=logging_module.NOTSET):
+            super().__init__(level)
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                from tqdm import tqdm
+                tqdm.write(msg)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+
+    ch = TqdmLoggingHandler()
+    ch.setLevel(logging_module.WARNING) # Only warnings/errors to console to keep progress bar clean
+    ch.setFormatter(logging_module.Formatter("%(message)s"))
 
     logger.addHandler(fh)
     logger.addHandler(ch)
 
     logger.info(f"Log file: {log_path}")
     return logger
+
+def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
+    """Worker function to run a single seed in an isolated subprocess."""
+    try:
+        seed_run_dir = integration_seed_run(batch_dir, seed)
+        
+        # Setup command to run main.py as a subprocess
+        cmd = [
+            sys.executable,
+            os.path.join(PROJECT_ROOT, "src", "main.py"),
+            "--seed", str(seed),
+            "--run-dir", str(seed_run_dir)
+        ]
+        if not no_video:
+            cmd.append("--save-video")
+            
+        # Run the command and capture output
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+        
+        # Check for crash
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Subprocess failed with exit code {result.returncode}.\n"
+                f"Stdout:\n{result.stdout}\n"
+                f"Stderr:\n{result.stderr}"
+            )
+        
+        # Read metadata.json and trajectory.csv
+        meta_path = os.path.join(seed_run_dir, "metadata.json")
+        traj_path = os.path.join(seed_run_dir, "trajectory.csv")
+        
+        if not os.path.exists(meta_path) or not os.path.exists(traj_path):
+            raise FileNotFoundError(f"Subprocess completed but missing metadata or trajectory file in {seed_run_dir}")
+            
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        
+        df = pd.read_csv(traj_path)
+        history = df.to_dict(orient="records")
+        
+        success = meta.get("success", False)
+        
+        # Extract interception errors at the actual moment of strike (closest approach / contact)
+        if history:
+            closest_step = min(history, key=lambda h: h["pos_err"])
+            strike_pos_err = closest_step["pos_err"]
+            strike_heading_err = closest_step["heading_err"]
+        else:
+            strike_pos_err = meta.get("final_pos_err_m", 999.0)
+            strike_heading_err = meta.get("final_heading_err_rad", 999.0)
+
+        final_ball = np.array([history[-1]["ball_x"], history[-1]["ball_y"]]) if history else np.array([0,0])
+        final_car = np.array([history[-1]["car_x"], history[-1]["car_y"]]) if history else np.array([0,0])
+        
+        # Ball is allowed to cross W if it was a goal
+        ball_x_max = DEFAULT_FIELD_W + 2.0 if success else DEFAULT_FIELD_W
+        on_field = (
+            0.0 <= final_ball[0] <= ball_x_max
+            and 0.0 <= final_ball[1] <= DEFAULT_FIELD_H
+            and 0.0 <= final_car[0] <= DEFAULT_FIELD_W
+            and 0.0 <= final_car[1] <= DEFAULT_FIELD_H
+        )
+
+        return {
+            "seed": seed,
+            "crashed": False,
+            "success": success,
+            "on_field": on_field,
+            "strike_pos_err": strike_pos_err,
+            "strike_heading_err": strike_heading_err,
+            "final_ball": final_ball,
+            "final_car": final_car,
+            "error_msg": ""
+        }
+        
+    except Exception as e:
+        return {
+            "seed": seed,
+            "crashed": True,
+            "success": False,
+            "on_field": False,
+            "strike_pos_err": 999.0,
+            "strike_heading_err": 999.0,
+            "final_ball": np.array([0,0]),
+            "final_car": np.array([0,0]),
+            "error_msg": str(e)
+        }
+
 
 def main():
     parser = argparse.ArgumentParser(description="Integration test with per-seed videos")
@@ -105,9 +192,9 @@ def main():
     log = setup_logging(str(batch_dir))
     log.info(f"Batch directory: {batch_dir}")
     log.info(f"Seeds: {seeds}")
+    
     successes = 0
     failures = 0
-    
     pos_errors = []
     heading_errors = []
 
@@ -116,118 +203,49 @@ def main():
     log.info(f"  Bounce: restitution={DEFAULT_BALL_RESTITUTION}, dt={DEFAULT_BALL_DT}, field={DEFAULT_FIELD_W}x{DEFAULT_FIELD_H}")
     log.info("=" * 65)
 
-    for i, seed in enumerate(seeds):
-        log.info(f"\n--- Running Seed {seed} ({i+1}/{len(seeds)}) ---")
-        
-        # Set seeds
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+    # CasADi/IPOPT and Matplotlib video rendering use a massive amount of RAM and stack memory.
+    # We must limit the concurrent workers here to prevent Out Of Memory (OOM) and Stack Overflow crashes.
+    num_workers = min(4, multiprocessing.cpu_count())
+    log.info(f"  Running concurrently with {num_workers} thread workers to preserve RAM.")
 
-        # Generate states exactly as in main.py to be consistent
-        b_x = np.random.uniform(2.0, 8.0)
-        b_y = np.random.uniform(0.0, 6.0)
-        phi = np.random.uniform(0.0, 2 * np.pi)
-        v_b = np.random.uniform(0.5, 2.0)
-        b_vx = v_b * np.cos(phi)
-        b_vy = v_b * np.sin(phi)
-        
-        c_x = np.random.uniform(0.0, 4.0)
-        c_y = np.random.uniform(0.0, 6.0)
-        c_theta = np.random.uniform(-np.pi, np.pi)
+    from tqdm import tqdm
+    pbar = tqdm(total=len(seeds), desc="Integration Test")
 
-        ball_start = np.array([b_x, b_y])
-        ball_vel = np.array([b_vx, b_vy])
-        car_start = np.array([c_x, c_y, c_theta, 0.0])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_seed = {
+            executor.submit(_run_single_seed, seed, batch_dir, args.no_video): seed
+            for seed in seeds
+        }
 
-        log.info(f"  Ball start: {ball_start} | Vel: {ball_vel}")
-        log.info(f"  Car start : {car_start}")
-
-        # Run simulation in a subprocess to completely avoid CasADi/IPOPT memory leaks and segfaults
-        try:
-            seed_run_dir = integration_seed_run(batch_dir, seed)
+        for future in concurrent.futures.as_completed(future_to_seed):
+            seed = future_to_seed[future]
+            res = future.result()
             
-            # Setup command to run main.py as a subprocess
-            cmd = [
-                sys.executable,
-                os.path.join(PROJECT_ROOT, "src", "main.py"),
-                "--seed", str(seed),
-                "--run-dir", str(seed_run_dir)
-            ]
-            if not args.no_video:
-                cmd.append("--save-video")
+            log.info(f"\n--- Result for Seed {seed} ---")
+            
+            if not res["crashed"]:
+                if not res["on_field"]:
+                    log.warning(f"  [WARN] Final state left the field: ball={res['final_ball']}, car={res['final_car']}")
                 
-            # Run the command and capture output
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False
-            )
-            
-            # Check for crash
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Subprocess failed with exit code {result.returncode}.\n"
-                    f"Stdout:\n{result.stdout}\n"
-                    f"Stderr:\n{result.stderr}"
-                )
-            
-            # Read metadata.json and trajectory.csv
-            meta_path = os.path.join(seed_run_dir, "metadata.json")
-            traj_path = os.path.join(seed_run_dir, "trajectory.csv")
-            
-            if not os.path.exists(meta_path) or not os.path.exists(traj_path):
-                raise FileNotFoundError(f"Subprocess completed but missing metadata or trajectory file in {seed_run_dir}")
+                if res["success"] and res["on_field"]:
+                    successes += 1
+                    log.info(f"  [SUCCESS] Goal scored!")
+                else:
+                    failures += 1
+                    log.info(f"  [FAILED]: Missed goal or left field.")
                 
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            
-            df = pd.read_csv(traj_path)
-            history = df.to_dict(orient="records")
-            
-            success = meta["success"]
-            
-            # Extract interception errors at the actual moment of strike (closest approach / contact)
-            if history:
-                closest_step = min(history, key=lambda h: h["pos_err"])
-                strike_pos_err = closest_step["pos_err"]
-                strike_heading_err = closest_step["heading_err"]
+                log.info(f"  Strike errors: pos={res['strike_pos_err']:.4f} m | heading={res['strike_heading_err']:.4f} rad")
             else:
-                strike_pos_err = meta["final_pos_err_m"]
-                strike_heading_err = meta["final_heading_err_rad"]
-
-            pos_errors.append(strike_pos_err)
-            heading_errors.append(strike_heading_err)
-
-            final_ball = np.array([history[-1]["ball_x"], history[-1]["ball_y"]])
-            final_car = np.array([history[-1]["car_x"], history[-1]["car_y"]])
-            
-            # Ball is allowed to cross W if it was a goal
-            ball_x_max = DEFAULT_FIELD_W + 2.0 if success else DEFAULT_FIELD_W
-            on_field = (
-                0.0 <= final_ball[0] <= ball_x_max
-                and 0.0 <= final_ball[1] <= DEFAULT_FIELD_H
-                and 0.0 <= final_car[0] <= DEFAULT_FIELD_W
-                and 0.0 <= final_car[1] <= DEFAULT_FIELD_H
-            )
-            if not on_field:
-                log.warning(f"  [WARN] Final state left the field: ball={final_ball}, car={final_car}")
-
-            if success and on_field:
-                successes += 1
-                log.info(f"  [SUCCESS] Goal scored!")
-            else:
+                log.error(f"  [CRASH] Run crashed with exception: {res['error_msg']}")
                 failures += 1
-                log.info(f"  [FAILED]: Missed goal or left field.")
+                
+            pos_errors.append(res['strike_pos_err'])
+            heading_errors.append(res['strike_heading_err'])
             
-            log.info(f"  Strike errors: pos={strike_pos_err:.4f} m | heading={strike_heading_err:.4f} rad")
+            pbar.update(1)
+            pbar.set_postfix(success=successes, fail=failures, pos_err=f"{np.mean(pos_errors):.2f}", head_err=f"{np.mean(heading_errors):.2f}")
 
-        except Exception as e:
-            log.error(f"  [CRASH] Run crashed with exception: {e}")
-            failures += 1
-            pos_errors.append(999.0)
-            heading_errors.append(999.0)
+    pbar.close()
 
     # Summary
     log.info("")
