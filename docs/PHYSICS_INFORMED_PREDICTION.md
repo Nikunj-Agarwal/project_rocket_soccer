@@ -33,10 +33,10 @@ occupies at `T_s`. This is a structural error mode, not a tuning issue.
 
 Empirically this was the measured bottleneck on the **previous try** (hybrid + legacy only). Fill current numbers from `data/reports/plots/integration/{LATEST_INTEGRATION_BATCH}/fallback_summary.md` after a hybrid/legacy batch, or compare variants in `comparison.csv` under `{LATEST_COMPARISON_RUN}`.
 
-Illustrative pattern (replace with your run):
+Illustrative pattern (reference run `20260613_025809`; replace from your latest batch):
 - Network-trusted episodes: lower success rate; higher `strike_point_pred_err_m` when legacy predicts off-trajectory $(x,y)$.
 - Fallback episodes: position on ball path by construction; often higher success rate.
-- Large fallback share on `hybrid_legacy` vs near-zero pred err on `neural_structured` supports the structured design.
+- `neural_structured` shows near-zero pred err (tautological); hybrid success ~72% vs ~73% legacy — structured does not close the gap.
 
 So the network is losing accuracy precisely on the quantity that can be derived
 exactly from known physics.
@@ -92,25 +92,26 @@ flowchart LR
   `T_s` being reachable/accurate. Physics-informed prediction removes the
   *position* error mode only. If heading prediction is the real limiter for some
   scenes, the gain will be partial.
-- The "push pure-network success to >= 80%, drop the fallback, and claim the full
-  1748x speedup safely" outcome is **plausible but must be verified empirically**,
-  not assumed.
+- The "push pure-network success to >= 80%, drop the fallback, and claim full
+  analytic-speedup" outcome was **not observed** on reference run
+  `20260613_025809` (pure neural 44–46%, fallback share ~42–49%). Report
+  measured success and bimodal hybrid latency instead of assuming speedup.
 
 ---
 
 ## 4. Latency honesty
 
-After this change the deployed network decision costs:
+**Deployed latency** is `decision_latency_ms` in each run's `metadata.json`: wall-clock of the full `decide_strike_target()` path (30-rep median for neural/hybrid), including inference, ball rollout, scoring checks, and hybrid fallback sweep when it fires.
 
-```
-network inference (~0.166 ms)  +  one ball rollout to a single T_s (sub-ms)
-```
+| Path | Typical cost (reference run `20260613_025809`) |
+| :--- | :--- |
+| Network-trusted (legacy or structured) | ~0.4–0.9 ms |
+| Hybrid fallback (36-heading sweep at network $T$) | ~8 ms — **not** full `analytic_strike_plan` |
+| Full analytic search | ~560 ms |
 
-versus the analytic search's full `T`-sweep x `theta`-sweep (~352 ms at
-n_angles=36). There is no longer a runtime `theta`-sweep on the trusted path.
-Report decision latency as `inference + single rollout` (still hundreds-to-
-thousands x faster), not inference-only. If the fallback is retained, also report
-its share and its true runtime cost.
+Micro-benchmarks `strikenet_infer_ms` and `analytic_strategy_ms` (30-rep) support scalability plots in `benchmark_scalability.py`; do not substitute them for deployed hybrid latency.
+
+If hybrid fallback share remains ~40–50%, report **bimodal** latency (network path vs fallback path) separately — see `hybrid_path_breakdown.png` from `analyze_comparison.py`.
 
 ---
 
@@ -127,17 +128,22 @@ These changes were fully implemented in the Dual-Model 3-Way Comparison update:
 - Parameterized planner modes (`analytic`, `neural`, `hybrid`) to allow comparative benchmarking without contaminating evaluation of the core network policy.
 
 ### 5.3 Batch Processing
-- Added `scripts/compare_modes.py` to automate testing 5 permutations of planner modes and model variants over fixed random seeds to generate comparative latency, error, and success rate analysis.
+- Added `scripts/compare_modes.py` to automate testing 5 permutations of planner modes and model variants over fixed random seeds.
+- Added `scripts/analyze_comparison.py` (step 8) for Pareto / worth-it analysis after comparison runs.
 
 ---
 
-## 6. Acceptance criteria
+## 6. Acceptance criteria (empirical findings)
 
-- Network-path mean strike *position* error is ~0 (sanity: equals the analytic
-  path, since both now sit on the ball trajectory).
-- Pure-network (no-fallback) goal success rate measured and reported.
-- Fallback engagement share drops materially; if it approaches ~0, the
-  inference-only/inference+rollout speedup can be claimed for the deployed system.
-- Out-of-distribution check (different field size / restitution / ball-speed
-  range) shows the structured model generalizing at least as well as the current
-  one.
+Reference comparison `20260613_025809` (seeds 100–199):
+
+| Criterion | Result | Interpretation |
+| :--- | :--- | :--- |
+| Structured network-path position error ≈ 0 | **Yes** (~0.035 m mean on `neural_structured`; on-trajectory by construction) | Sanity check passes — do not cite pred err alone as success metric |
+| Pure-network success ≥ 80% | **No** (44–46%) | Position fix alone insufficient; heading/timing and NMPC execution dominate |
+| Fallback share drops materially vs legacy hybrid | **No** (~42–49%, similar to pre-structured hybrid) | Scoring guard still rejects many network headings; structured does not eliminate fallback |
+| Structured beats legacy on hybrid success | **No** (72% vs 73%) | Gains are diagnostic (lower pred err), not closed-loop success |
+
+**Reporting rule:** lead with strike-gated success and deployed latency; treat low structured position error as expected tautology, not a headline win.
+
+---

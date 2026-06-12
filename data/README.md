@@ -19,10 +19,15 @@ data/
 │   └── training_log_structured.csv
 ├── reports/
 │   ├── benchmarks/scalability.csv
+│   ├── pipeline_summaries/              # summarize_pipeline.py --save
 │   └── plots/
 │       ├── global/
 │       ├── integration/{batch_id}/
-│       └── comparison/{run_id}/       # comparison.csv, comparison_bars.png
+│       └── comparison/{run_id}/       # compare_modes + analyze_comparison
+│           ├── comparison.csv, comparison_bars.png
+│           ├── worth_it_summary.md
+│           ├── pareto_success_vs_latency.png
+│           └── config_summary.csv, win_matrix.csv, ...
 ├── tests/
 │   ├── integration/{batch_id}/        # test_main.py
 │   │   ├── batch.log
@@ -49,14 +54,27 @@ python -m src.network --variant both
 python scripts/test_network.py
 python scripts/test_main.py --planner-mode hybrid --model-variant legacy --no-video
 python scripts/compare_modes.py
+python -m scripts.analyze_comparison
 
 python scripts/generate_plots.py
 python scripts/generate_plots.py --batch {LATEST_INTEGRATION_BATCH}
 
+python scripts/summarize_pipeline.py --save
+
 python src/main.py --seed 10 --planner-mode hybrid --model-variant structured --save-video
 ```
 
-Or run everything: `.\run_pipeline.ps1 -NoVideo` from project root.
+Or run everything: `.\run_pipeline.ps1 -NoVideo` from project root (8 steps + auto summary).
+
+## Latency fields in `metadata.json`
+
+| Field | Role |
+| :--- | :--- |
+| `decision_latency_ms` | Deployed path (full `decide_strike_target()` timing) |
+| `fallback_sweep_ms` | Hybrid fallback 36-heading sweep only |
+| `strikenet_infer_ms` | Diagnostic micro-benchmark (scalability) |
+
+See [docs/DATA_AND_REPORTS.md](../docs/DATA_AND_REPORTS.md).
 
 ## Video output
 

@@ -4,14 +4,18 @@ DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve
 Key tokens used in this document:
   {PREVIOUS_INTEGRATION_BATCH}  — pre dual-model reference (example: 20260612_155705)
   {LATEST_INTEGRATION_BATCH}      — step-4 output of run_pipeline (hybrid/legacy default)
-  {LATEST_COMPARISON_RUN}       — step-7 output; metrics in comparison.csv
+  {LATEST_COMPARISON_RUN}       — step-7 output; metrics in comparison.csv + analyze_comparison artifacts
+
+Reference run with corrected deployed latency: 20260613_025809
 -->
 
 # Autonomous Soccer Striker: A Hybrid Approach using Imitation Learning and Non-linear Model Predictive Control
 
 ## Abstract
 
-This paper presents a hybrid control architecture for an autonomous robotic soccer striker that intercepts a moving, bouncing ball and deflects it into a goal. Offline imitation learning trains **two** StrikeNet variants: a **legacy** network predicting interception time, strike position, and heading, and a **structured** network predicting only time and heading while deriving strike position from deterministic ball physics. Online execution supports **three planner modes** — pure analytic search, pure neural inference, and hybrid (neural with scoring-guard fallback) — enabling controlled ablation. A shrinking-horizon NMPC solver handles kinodynamic execution with elastic collisions, target-offset heuristics, pursuit warm-starting, and post-strike braking. Integration tests (default: 100 seeds, 100–199) use strike-gated success (`scored AND ball_struck`). Headline accuracy is `strike_point_pred_err_m` (predicted target vs ball-at-contact). Quantitative tables below distinguish a **previous try** (single hybrid mode, legacy model only) from the **current system** (five-config comparison harness); replace placeholders after each pipeline run.
+This paper presents a hybrid control architecture for an autonomous robotic soccer striker that intercepts a moving, bouncing ball and deflects it into a goal. Offline imitation learning trains **two** StrikeNet variants: a **legacy** network predicting interception time, strike position, and heading, and a **structured** network predicting only time and heading while deriving strike position from deterministic ball physics. Online execution supports **three planner modes** — pure analytic search, pure neural inference, and hybrid (neural with scoring-guard fallback) — enabling controlled ablation via a five-config comparison harness. A shrinking-horizon NMPC solver handles kinodynamic execution with elastic collisions, target-offset heuristics, pursuit warm-starting, and post-strike braking.
+
+Integration tests (default: 100 seeds, 100–199) use strike-gated success (`scored AND ball_struck`). On reference run `20260613_025809`: analytic mode reaches **80%** success at ~561 ms median decision latency; pure neural modes reach only **44–46%** at ~0.4 ms; hybrid modes recover **72–73%** success with bimodal latency (~0.9 ms network path, ~8 ms fallback heading sweep — not full analytic search). The structured variant achieves near-zero position error by construction but does **not** outperform legacy on closed-loop success, indicating heading and timing — not spatial regression — as the principal bottleneck.
 
 ---
 
@@ -26,7 +30,7 @@ Hybrid architectures that separate a learned strategy layer from an optimization
 | Stage | Description |
 | :--- | :--- |
 | **Previous try** | Single **hybrid** planner only: legacy StrikeNet predicts $(T,x,y,\theta)$; scoring rollout guards the plan; analytic heading sweep on failure. One checkpoint (`strategy_net.pth`). No pure analytic or pure neural baseline at runtime. |
-| **Current system** | **Three planner modes** (`analytic`, `neural`, `hybrid`) × **two model variants** (`legacy`, `structured`). Structured variant removes independent $(x,y)$ prediction — position is derived by `propagate_ball_for_time`. Automated **5-config comparison** on shared seeds (`scripts/compare_modes.py`). |
+| **Current system** | **Three planner modes** (`analytic`, `neural`, `hybrid`) × **two model variants** (`legacy`, `structured`). Structured variant removes independent $(x,y)$ prediction — position is derived by `propagate_ball_for_time`. Automated **5-config comparison** on shared seeds plus **cost/benefit analysis** (`scripts/analyze_comparison.py`). |
 
 We validate over 100 randomized seeds (default 100–199) and report both the default hybrid/legacy integration batch and the full comparison matrix.
 
@@ -61,7 +65,7 @@ Z-scored I/O; MSE in normalized space. See [PIPELINE_LOGIC.md](PIPELINE_LOGIC.md
 
 1. **Analytic** — full `analytic_strike_plan()` (no network).
 2. **Neural** — StrikeNet prediction used directly.
-3. **Hybrid** — use network if scoring rollout passes; else inline fallback (ball at network $T$, 36-heading sweep).
+3. **Hybrid** — use network if scoring rollout passes; else **36-heading sweep** at network $T$ and propagated ball position (~8 ms). This fallback is **not** a full analytic re-search (~560 ms).
 
 Structured variant: $(x,y)$ from ball propagation, not network output.
 
@@ -81,30 +85,32 @@ See architecture diagram in [SYSTEM_OVERVIEW.md](SYSTEM_OVERVIEW.md).
 
 **Legacy** — must learn implicit ball physics for $(x,y)$ at time $T$; principal failure mode when position is wrong but heading rollout still passes.
 
-**Structured** — network learns timing and heading only; position is on-trajectory by construction. Decision latency includes one `propagate_ball_for_time` call. Rationale: [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md).
+**Structured** — network learns timing and heading only; position is on-trajectory by construction. Rationale and empirical caveats: [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md).
 
 ### 4.3 NMPC execution, offset, warm-start, braking
 
 Unchanged from Phase 5: pursuit warm-start, $d_{offset}=0.32$ m, active braking in Phase 2, strike-gated success. See [UPDATE.md](UPDATE.md).
 
+### 4.4 Latency measurement
+
+**Deployed latency** (`decision_latency_ms`): wall-clock of `decide_strike_target()`, 30-rep median for neural/hybrid. Includes inference, rollout, scoring checks, and hybrid fallback sweep. Diagnostic micro-benchmarks `strikenet_infer_ms` / `analytic_strategy_ms` support scalability plots only.
+
 ---
 
 ## 5. Results
 
-**Success definition:** `success = scored AND ball_struck`. **Pass criterion:** $\ge 60\%$ strike-gated success (`scripts/test_main.py`).
+**Success definition:** `success = scored AND ball_struck`. **Pass criterion:** $\ge 60\%$ strike-gated success (`scripts/test_main.py`). No hard latency pass/fail gate (NMPC control period = 100 ms/step).
 
 ### 5.1 Previous try vs current system
 
 | Aspect | Previous try | Current system |
 | :--- | :--- | :--- |
-| **Reference batch** | `{PREVIOUS_INTEGRATION_BATCH}` (50 seeds, illustrative) | `{LATEST_INTEGRATION_BATCH}` (step 4) + `{LATEST_COMPARISON_RUN}` (step 7) |
+| **Reference batch** | `{PREVIOUS_INTEGRATION_BATCH}` (50 seeds, illustrative) | `{LATEST_INTEGRATION_BATCH}` (step 4) + `{LATEST_COMPARISON_RUN}` (steps 7–8) |
 | **Planner configs evaluated** | Hybrid + legacy only | 5 configs: analytic; neural×2; hybrid×2 |
 | **Structured model** | Not implemented | Trained and compared |
-| **Primary metrics source** | `batch.log`, `analyze_fallback.py` | `summary.json`, `comparison.csv`, `research_summary.md` |
+| **Primary metrics source** | `batch.log`, `analyze_fallback.py` | `comparison.csv`, `worth_it_summary.md`, `research_summary.md` |
 
 ### 5.2 Previous try — illustrative aggregate (hybrid, legacy)
-
-*Fill from `data/tests/integration/{PREVIOUS_INTEGRATION_BATCH}/` if still on disk.*
 
 | Metric | Target | Achieved (N=50 example) |
 | :--- | :--- | :--- |
@@ -115,47 +121,46 @@ Unchanged from Phase 5: pursuit warm-start, $d_{offset}=0.32$ m, active braking 
 
 **Failure analysis (previous try):** Network-trusted episodes suffered inaccurate predicted *position*; scoring rollout validates heading-at-position, not spatial accuracy. This motivated the structured variant.
 
-### 5.3 Current system — integration batch (hybrid, legacy default)
+### 5.3 Current system — five-config comparison (reference: `20260613_025809`)
 
-*Replace after `run_pipeline` step 4.*
+Seeds 100–199; corrected deployed latency measurement.
 
-| Metric | Source | Value |
-| :--- | :--- | :--- |
-| Success rate | `{LATEST_INTEGRATION_BATCH}/summary.json` → `success_rate` | *fill from batch* |
-| Mean `strike_point_pred_err_m` | `summary.json` → `mean_pred_err_m` | *fill from batch* |
-| Mean decision latency (ms) | `summary.json` → `mean_decision_latency_ms` | *fill from batch* |
-| Network vs fallback | `analyze_fallback.py` on hybrid batch | *fill from fallback_summary.md* |
+| Config | Success rate | Mean pred err (m) | Median latency (ms) | Fallback share |
+| :--- | ---: | ---: | ---: | ---: |
+| analytic | **80%** | 0.064 | ~561 | 0% |
+| neural_legacy | 46% | 0.185 | ~0.36 | — |
+| neural_structured | 44% | 0.035 | ~0.56 | — |
+| hybrid_legacy | **73%** | 0.137 | ~0.88 (p90 ~8) | ~42% |
+| hybrid_structured | **72%** | 0.048 | ~0.91 | ~49% |
 
-### 5.4 Current system — five-config comparison
+*Replace with `{LATEST_COMPARISON_RUN}` after each pipeline run.*
 
-*Replace after `run_pipeline` step 7 → `data/reports/plots/comparison/{LATEST_COMPARISON_RUN}/comparison.csv`.*
+**Key findings:**
 
-| Config | Success rate | Mean pred err (m) | Mean latency (ms) | Fallback share |
-| :--- | :--- | :--- | :--- | :--- |
-| analytic | *fill* | *fill* | *fill* | 0% |
-| neural_legacy | *fill* | *fill* | *fill* | — |
-| neural_structured | *fill* | *fill* | *fill* | — |
-| hybrid_legacy | *fill* | *fill* | *fill* | *fill* |
-| hybrid_structured | *fill* | *fill* | *fill* | *fill* |
+1. **Pure neural is not deployment-viable** (~46% success) despite sub-millisecond latency.
+2. **Hybrid recovers ~91% of analytic ceiling** (73% vs 80%) with **+27 pp** over pure neural.
+3. **Latency is bimodal:** network-trusted ~0.5 ms; fallback ~8 ms (heading sweep only, not full analytic).
+4. **Structured variant:** near-zero position error is tautological; success does not beat legacy hybrid — heading/timing remain the limiter.
 
-**Expected patterns (hypotheses to verify on your run):**
-- `neural_structured` should show near-zero `strike_point_pred_err_m` (on-trajectory position).
-- `neural_legacy` may trail `hybrid_*` on success rate (no fallback guard).
-- `analytic` is the oracle upper bound on planning correctness; latency is highest.
+### 5.4 Integration batch (hybrid, legacy default)
+
+*Replace after `run_pipeline` step 4 from `{LATEST_INTEGRATION_BATCH}/summary.json`.*
 
 ### 5.5 Computational performance
 
 NMPC solve times: `trajectory.csv` → `solve_ms`; summarized in `research_summary.md`.
 
-**Scalability:** `scripts/benchmark_scalability.py --model-variant both` → `scalability.csv` (includes `variant` column; structured = infer + rollout).
+**Scalability:** `scripts/benchmark_scalability.py --model-variant both` → `scalability.csv`. Pipeline default: light run (50 scenes × 10 reps). Includes hybrid fallback sweep column for worst-case hybrid cost.
 
 ---
 
 ## 6. Discussion
 
-**Strengths.** Modular strategy/execution split; hard NMPC constraints; pursuit warm-start; target offset for heading alignment; explicit ablation via three modes and two variants.
+**Strengths.** Modular strategy/execution split; hard NMPC constraints; pursuit warm-start; target offset for heading alignment; rigorous five-config ablation with honest deployed latency and cost/benefit reporting.
 
-**Limitations.** Open-loop plan at $t=0$; 36-heading discretization; simplified ball physics; fixed field geometry; perfect state observation.
+**Limitations.** Open-loop plan at $t=0$; 36-heading discretization; simplified ball physics; fixed field geometry; perfect state observation; structured position fix does not close the success gap.
+
+**Cost-benefit argument.** Hybrid offers the best success–latency trade-off for this task: near-analytic reliability without paying full analytic cost on every episode. Fallback episodes cost ~8 ms, not ~560 ms, because the network already fixes $T$ and ball position — only heading is repaired.
 
 **Future work.** Closed-loop re-querying; anchor-based heading for multimodal scenes; observation noise; sim-to-real; optional $R_{turn}$ regen ($0.35 \to 0.30$ m).
 
@@ -163,7 +168,7 @@ NMPC solve times: `trajectory.csv` → `solve_ms`; summarized in `research_summa
 
 ## 7. Conclusion
 
-The striker demonstrates learned high-level strategy with deterministic NMPC execution. The **previous try** established hybrid legacy mode with strike-gated metrics and identified position prediction as the accuracy bottleneck. The **current system** implements physics-informed structured prediction and a rigorous five-config comparison to quantify analytic, neural, and hybrid behaviour for both variants. Replace result placeholders after each full pipeline run.
+The striker demonstrates learned high-level strategy with deterministic NMPC execution. The **previous try** established hybrid legacy mode with strike-gated metrics and identified position prediction as an accuracy bottleneck. The **current system** implements physics-informed structured prediction and a five-config comparison showing that (1) hybrid guardrails are essential, (2) structured prediction removes spatial error but not the success gap, and (3) deployed latency must include fallback cost — while recognizing fallback is a lightweight heading sweep, not full analytic search.
 
 ---
 

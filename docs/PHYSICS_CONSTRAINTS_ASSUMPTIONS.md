@@ -110,8 +110,12 @@ The old closest-approach position threshold ($\le 0.35$ m) is **not** a pass gat
 * `strike_point_pred_err_m` — predicted target vs ball-at-contact
 * `strike_time_err_s` — timing error vs predicted horizon
 
-**Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`.
+**Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`, cross-config analysis via `scripts/analyze_comparison.py`.
+
+### Hybrid fallback vs full analytic (latency)
+
+When hybrid rejects the network plan, it runs a **36-heading scoring sweep** at the network's predicted time and propagated ball position (~8 ms median). It does **not** re-run `analytic_strike_plan` (full $T$-grid + reachability + heading search, ~560 ms). Do not multiply fallback share by full analytic latency when estimating hybrid cost.
 
 *Previous try (`{PREVIOUS_INTEGRATION_BATCH}`, 50 seeds):* 74% strike-gated success (37/50), network 16/26 (61.5%), fallback 21/24 (87.5%).
 
-*Current system:* fill from `{LATEST_INTEGRATION_BATCH}/summary.json` and `{LATEST_COMPARISON_RUN}/comparison.csv` after `run_pipeline.ps1`.
+*Reference five-config comparison (`20260613_025809`, 100 seeds):* analytic 80%; hybrid_legacy 73% (median lat ~0.88 ms, fallback sweep ~7.9 ms when fired); pure neural 46%. Fill latest from `{LATEST_COMPARISON_RUN}/comparison.csv` and `worth_it_summary.md`.

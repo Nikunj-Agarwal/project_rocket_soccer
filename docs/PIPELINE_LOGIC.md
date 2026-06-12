@@ -56,7 +56,7 @@ decide_strike_target(planner_mode, model, model_variant, input7, ...)
 | :--- | :--- |
 | **analytic** | `analytic_strike_plan()` → $(T, x, y, \theta)$. If infeasible: ball at $T=2$s fallback. |
 | **neural** | `model.predict()` → use prediction directly (`target_source = "network"`). |
-| **hybrid** | Predict → scoring rollout; if pass use network, else heading sweep at propagated ball position (`target_source = "fallback"`). |
+| **hybrid** | Predict → scoring rollout; if pass use network, else **36-heading sweep** at network $T$ and propagated ball position (`target_source = "fallback"`). This fallback is **not** full `analytic_strike_plan` (~8 ms vs ~560 ms). |
 
 **Structured variant:** after predicting $(T, \theta)$, $x,y$ come from `propagate_ball_for_time` to $T_{final}$ — not from the network.
 
@@ -100,9 +100,16 @@ sequenceDiagram
 ### Latency metadata
 
 Per run, `metadata.json` records:
-* `strikenet_infer_ms`, `rollout_ms` (structured only), `decision_latency_ms`
-* `analytic_strategy_ms` (timed reference, not control path unless `analytic` mode)
-* `planner_mode`, `model_variant`
+
+| Field | Meaning |
+| :--- | :--- |
+| **`decision_latency_ms`** | **Deployed path** — wall-clock of `decide_strike_target()` (30-rep median for neural/hybrid; analytic reuses `analytic_strategy_ms`). Includes inference, rollout, scoring checks, and hybrid fallback sweep when it fires. |
+| **`fallback_sweep_ms`** | Hybrid only: time in the 36-heading sweep when `target_source = "fallback"`. |
+| **`infer_plus_rollout_ms`** | Neural/structured: inference + single ball rollout (diagnostic). |
+| **`strikenet_infer_ms`**, **`analytic_strategy_ms`** | 30-rep micro-benchmarks for scalability — not the headline deployed latency unless mode is pure analytic. |
+| **`planner_mode`**, **`model_variant`** | Config tags for comparison grouping. |
+
+`summary.json` adds batch-level `mean_decision_latency_ms`, `median_decision_latency_ms`, and path-specific medians when available.
 
 ---
 
@@ -133,14 +140,18 @@ Runs five configs on shared seeds (videos off by default):
 
 Outputs under `data/tests/comparison/{LATEST_COMPARISON_RUN}/` and `data/reports/plots/comparison/{run}/`.
 
+**Step 8 — cost/benefit analysis** (`python -m scripts.analyze_comparison`): reads comparison metadata and writes `worth_it_summary.md`, Pareto/latency/heatmap plots, `config_summary.csv`, `win_matrix.csv`, etc. Run automatically after step 7 in `run_pipeline.ps1` / `.sh`.
+
 ### Other scripts
 
 | Script | Role |
 | :--- | :--- |
 | `scripts/generate_plots.py` | Per-batch trajectory/error plots |
-| `scripts/analyze_results.py` | `research_summary.md`; surfaces `planner_mode` / `model_variant` |
+| `scripts/analyze_results.py` | `research_summary.md`; deployed latency plot |
 | `scripts/analyze_fallback.py` | Hybrid-only network vs fallback (graceful skip otherwise) |
-| `scripts/benchmark_scalability.py` | `--model-variant both` for legacy vs structured latency |
+| `scripts/analyze_comparison.py` | Cross-config cost/benefit after `compare_modes.py` |
+| `scripts/benchmark_scalability.py` | Analytic vs network; hybrid fallback sweep; `--model-variant both` |
+| `scripts/summarize_pipeline.py` | One-page rollup after full or partial pipeline |
 | `scripts/test_network.py` | Sanity check both variants on dataset samples |
 
 ### Full pipeline (`run_pipeline.ps1` / `run_pipeline.sh`)
@@ -150,5 +161,7 @@ Outputs under `data/tests/comparison/{LATEST_COMPARISON_RUN}/` and `data/reports
 3. Network sanity check  
 4. Integration test (hybrid/legacy, optional `-NoVideo`)  
 5. Plots + `analyze_results` + `analyze_fallback`  
-6. Scalability benchmark (`--model-variant both`)  
-7. `compare_modes.py`
+6. Scalability benchmark (light by default: 50 scenes × 10 reps; `-FullBench` for full sweep)  
+7. `compare_modes.py` — five configs on shared seeds  
+8. `analyze_comparison.py` — worth-it / Pareto analysis  
+9. `summarize_pipeline.py --save` (automatic, non-fatal if partial)

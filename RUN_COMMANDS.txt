@@ -72,14 +72,15 @@ Specific batch:
   python -m scripts.analyze_fallback --batch {LATEST_INTEGRATION_BATCH}
 
 ---------------------------------------------------------------------
- STEP 6 — Scalability benchmark (both variants)
+ STEP 6 — Scalability benchmark (light by default in pipeline)
 ---------------------------------------------------------------------
-python -m scripts.benchmark_scalability --model-variant both
+Full sweep:
+  python -m scripts.benchmark_scalability --model-variant both
 
-Faster:
+Faster (pipeline default):
   python -m scripts.benchmark_scalability --model-variant both --n-scenes 50 --repeats 10
 
-Output: data/reports/benchmarks/scalability.csv (variant column)
+Output: data/reports/benchmarks/scalability.csv (variant column; includes hybrid fallback sweep)
         data/reports/plots/global/scalability_curve.png
 
 ---------------------------------------------------------------------
@@ -93,6 +94,18 @@ hybrid×legacy/structured. Videos off by default.
 Output: data/tests/comparison/{LATEST_COMPARISON_RUN}/
         data/reports/plots/comparison/{run}/comparison.csv
         comparison_summary.md, comparison_bars.png
+
+---------------------------------------------------------------------
+ STEP 8 — Cross-method cost/benefit analysis
+---------------------------------------------------------------------
+python -m scripts.analyze_comparison
+
+Reads latest (or specified) comparison run metadata.
+
+Output: data/reports/plots/comparison/{run}/worth_it_summary.md
+        pareto_success_vs_latency.png, latency_by_config.png
+        success_heatmap.png, hybrid_path_breakdown.png, accuracy_vs_time.png
+        config_summary.csv, paired_seeds.csv, win_matrix.csv
 
 ---------------------------------------------------------------------
  EXTRAS
@@ -120,8 +133,8 @@ Saved to: data/reports/pipeline_summaries/{timestamp}_pipeline_summary.md
 =====================================================================
 conda activate striker
 cd D:\SNU\Semester_6\motion_planning\project_retry
-.\run_pipeline.ps1 -NoVideo              # full 7-step pipeline
-.\run_pipeline.ps1 -SkipData -SkipTrain -NoVideo -LightBench   # re-eval only
+.\run_pipeline.ps1 -NoVideo              # full 8-step pipeline
+.\run_pipeline.ps1 -SkipData -SkipTrain -NoVideo   # re-eval only (light bench default)
 
 Git Bash:
   bash run_pipeline.sh --no-video

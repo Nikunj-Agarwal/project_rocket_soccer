@@ -38,7 +38,7 @@ flowchart LR
     Clip --> Hybrid{hybrid?}
     Roll --> Hybrid
     Hybrid -- scores --> UseNet[target_source network]
-    Hybrid -- no score --> FB[heading sweep at ball pos]
+    Hybrid -- no score --> FB["36-heading sweep at network T (not full analytic search)"]
     AP --> Offset[0.32m offset]
     UseNet --> Offset
     FB --> Offset
@@ -53,7 +53,7 @@ flowchart LR
 | :--- | :---: | :--- |
 | **`analytic`** | No | Full `analytic_strike_plan()` from `src/planner.py`. `target_source = "analytic"` or `"analytic_infeasible"`. |
 | **`neural`** | Yes | StrikeNet prediction used directly (no scoring guard). `target_source = "network"`. |
-| **`hybrid`** | Yes | Network plan used when a scoring rollout passes; otherwise inline fallback at network horizon $T$ with 36-heading sweep. `target_source = "network"` or `"fallback"`. |
+| **`hybrid`** | Yes | Network plan used when a scoring rollout passes; otherwise **heading-only fallback** at the network-predicted time $T$ and propagated ball position (36-heading scoring sweep — **not** a full `analytic_strike_plan` search). `target_source = "network"` or `"fallback"`. |
 
 Implemented in `decide_strike_target()` in [`src/main.py`](../src/main.py).
 
@@ -78,7 +78,30 @@ Checkpoints: `models/strategy_net_legacy.pth`, `models/strategy_net_structured.p
 | **Goal** | `src/goal.py` | Goal mouth geometry and segment crossing. |
 | **Orchestration** | `src/main.py` | `decide_strike_target()`, NMPC loop, metadata logging, CLI flags. |
 | **Layout** | `src/data_layout.py` | Paths for datasets, per-variant models, integration/comparison batches, plots. |
-| **Comparison** | `scripts/compare_modes.py` | Runs 5 configs on shared seeds; writes `comparison.csv` + report. |
+| **Comparison** | `scripts/compare_modes.py` | Runs 5 configs sequentially on shared seeds; writes `comparison.csv` + report. |
+| **Cost/benefit analysis** | `scripts/analyze_comparison.py` | Pareto plots, win matrix, `worth_it_summary.md` from comparison metadata. |
+| **Pipeline summary** | `scripts/summarize_pipeline.py` | One-page rollup after a full or partial pipeline run. |
+
+---
+
+## Decision latency (what we measure)
+
+| Field | Meaning |
+| :--- | :--- |
+| **`decision_latency_ms`** | **Deployed path** — wall-clock of `decide_strike_target()` (30-rep median for neural/hybrid; analytic reuses its micro-benchmark). Includes inference, ball rollout, scoring checks, and hybrid fallback sweep when it fires. |
+| **`fallback_sweep_ms`** | Hybrid only: time in the 36-heading sweep when `target_source = "fallback"`. |
+| **`strikenet_infer_ms`**, **`analytic_strategy_ms`** | 30-rep diagnostic micro-benchmarks for scalability comparison — not the headline deployed latency. |
+
+**Critical distinction:** hybrid fallback (~8 ms median when it fires) is **not** full analytic search (~560 ms). Fallback fixes **heading** at the network-chosen **time and ball position**; it does not re-sweep $T \in [0.5, 5.0]$ s or car reachability. That is why hybrid stays fast even when ~42% of episodes fall back.
+
+**Typical deployed latencies** (reference run `20260613_025809`, seeds 100–199):
+
+| Config | Median latency | Notes |
+| :--- | ---: | :--- |
+| analytic | ~561 ms | Full `analytic_strike_plan` |
+| neural / hybrid (network path) | ~0.4–0.9 ms | Inference + rollout + one scoring check |
+| hybrid (fallback path) | ~7.9 ms | + 36-heading sweep |
+| pure neural | ~0.4 ms | No fallback guard |
 
 ---
 
@@ -113,9 +136,11 @@ Wall restitution $e=0.85$; bumper restitution $e_{strike}=0.8$. Goal: $x=10.0$, 
 | `scripts/test_main.py` | Single-config integration batch (`--planner-mode`, `--model-variant`, `--batch-dir`). Default: hybrid + legacy, 100 seeds (100–199). |
 | `scripts/compare_modes.py` | Five configs on shared seeds: analytic; neural×{legacy, structured}; hybrid×{legacy, structured}. |
 | `scripts/analyze_fallback.py` | Network vs fallback breakdown (**hybrid batches only**; exits gracefully otherwise). |
-| `scripts/benchmark_scalability.py` | Analytic vs network latency; `--model-variant both` includes structured infer+rollout. |
+| `scripts/benchmark_scalability.py` | Analytic vs network infer; hybrid fallback sweep cost; `--model-variant both`. |
+| `scripts/analyze_comparison.py` | Cost/benefit report after `compare_modes.py`. |
+| `scripts/summarize_pipeline.py` | Consolidated markdown summary. |
 
-Full pipeline: `run_pipeline.ps1` / `run_pipeline.sh` (7 steps).
+Full eval pipeline: `run_pipeline.ps1` / `run_pipeline.sh` (8 steps; light scalability benchmark by default).
 
 ---
 

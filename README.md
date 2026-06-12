@@ -32,11 +32,17 @@ python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_
 conda activate striker
 cd D:\SNU\Semester_6\motion_planning\project_retry
 
-# All 7 steps: data → train both variants → sanity → integration → reports → benchmark → comparison
+# All 8 eval steps: data → train both variants → sanity → integration → reports → benchmark → comparison → cost/benefit
 .\run_pipeline.ps1 -NoVideo
 ```
 
 Steps: see [docs/PIPELINE_LOGIC.md](docs/PIPELINE_LOGIC.md). Results paths use `{LATEST_INTEGRATION_BATCH}` and `{LATEST_COMPARISON_RUN}` — see [docs/README.md](docs/README.md) placeholder note.
+
+Re-eval only (skip data + train):
+
+```powershell
+.\run_pipeline.ps1 -SkipData -SkipTrain -NoVideo
+```
 
 ## Manual step-by-step
 
@@ -58,11 +64,17 @@ python scripts/generate_plots.py
 python scripts/analyze_results.py
 python -m scripts.analyze_fallback    # hybrid batches only
 
-# 6) Scalability (both variants)
-python -m scripts.benchmark_scalability --model-variant both
+# 6) Scalability (both variants; light by default in pipeline)
+python -m scripts.benchmark_scalability --model-variant both --n-scenes 50 --repeats 10
 
 # 7) Five-config comparison
 python scripts/compare_modes.py
+
+# 8) Cost/benefit analysis (Pareto, worth-it summary)
+python -m scripts.analyze_comparison
+
+# Pipeline summary (optional)
+python scripts/summarize_pipeline.py --save
 ```
 
 ### Planner modes and variants
@@ -84,10 +96,12 @@ python scripts/test_main.py --planner-mode neural --model-variant structured --n
 | `src/planner.py` | `analytic_strike_plan`, `max_reach_distance` |
 | `src/data_layout.py` | Paths for models, integration/comparison batches, plots |
 | `scripts/compare_modes.py` | 5-config comparison harness |
+| `scripts/analyze_comparison.py` | Cross-config cost/benefit after comparison |
+| `scripts/summarize_pipeline.py` | Consolidated pipeline summary |
 | `scripts/test_main.py` | Integration batches + `summary.json` |
 | `models/strategy_net_{legacy,structured}.pth` | Trained weights |
 | `data/` | Datasets, runs, tests, reports — [data/README.md](data/README.md) |
-| `run_pipeline.ps1` / `run_pipeline.sh` | End-to-end 7-step pipeline |
+| `run_pipeline.ps1` / `run_pipeline.sh` | End-to-end 8-step eval pipeline |
 
 ## Phases
 

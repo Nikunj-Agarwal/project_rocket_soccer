@@ -85,14 +85,25 @@ This upgrade keeps the **legacy** StrikeNet (predicts $T, x, y, \theta$) for com
 | **Structured prediction** | Proposed in docs only | Implemented: `propagate_ball_for_time` derives strike position |
 | **Evaluation** | One integration batch (hybrid/legacy default) | `compare_modes.py`: 5 configs × shared seeds |
 | **Fallback analysis** | Always attempted | Skips gracefully on analytic/neural-only batches |
-| **Benchmark** | Legacy inference only | `--model-variant both`; structured latency = infer + rollout |
-| **Pipeline** | 6 steps, single train | 7 steps: train both variants + comparison harness |
+| **Benchmark** | Legacy inference only | `--model-variant both`; analytic vs infer; hybrid fallback sweep |
+| **Pipeline** | 6 steps, single train | **8 steps:** train both variants + comparison + `analyze_comparison` + summary |
+| **Deployed latency** | Inference-only in metadata | Full `decide_strike_target()` path timed; hybrid fallback ≠ full analytic |
 
-**Key code:** `decide_strike_target()` in `src/main.py`; `StrikeNet(variant=...)` and `train(..., variant=...)` in `src/network.py`; paths in `src/data_layout.py`; `scripts/compare_modes.py`.
+**Key code:** `decide_strike_target()` in `src/main.py`; `StrikeNet(variant=...)` and `train(..., variant=...)` in `src/network.py`; paths in `src/data_layout.py`; `scripts/compare_modes.py`; `scripts/analyze_comparison.py`.
 
-**Full pipeline:** `.\run_pipeline.ps1` or `bash run_pipeline.sh` (use `-NoVideo` / `--no-video` for faster step 4).
+**Full pipeline:** `.\run_pipeline.ps1` or `bash run_pipeline.sh` (use `-NoVideo` / `--no-video` for faster step 4; light scalability benchmark by default).
 
 Design rationale for structured variant: [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md).
+
+---
+
+## ⏱️ Deployed Latency Measurement (2026-06)
+
+Earlier runs logged `decision_latency_ms` as inference-only (~0.2 ms for hybrid), which understated hybrid cost when the scoring guard fired fallback (~42% of episodes).
+
+**Fix:** `decide_strike_target()` now returns wall-clock **`decision_latency_ms`** (30-rep median for neural/hybrid) including ball rollout, scoring checks, and the **36-heading fallback sweep**. New fields: `fallback_sweep_ms`, `infer_plus_rollout_ms`. Micro-benchmarks `strikenet_infer_ms` / `analytic_strategy_ms` remain diagnostic for scalability plots.
+
+**Logical consequence:** hybrid median latency stays sub-millisecond on the network-trusted path (~0.5 ms) but fallback episodes add ~8 ms — **not** ~560 ms, because fallback does **not** call full `analytic_strike_plan` (no $T$-grid or reachability re-search). Reference comparison run with corrected timing: `20260613_025809`.
 
 ---
 
@@ -106,4 +117,16 @@ The integration test (`scripts/test_main.py`) runs **100** seeds by default (100
 
 *Previous try (illustrative, `{PREVIOUS_INTEGRATION_BATCH}`):* 74% success over 50 seeds (37/50); network 16/26 (61.5%), fallback 21/24 (87.5%). The earlier "88% / 44-50" figure reflected the old analytic-driven loop.
 
-*Current system:* fill from `{LATEST_INTEGRATION_BATCH}/summary.json` (step 4) and `{LATEST_COMPARISON_RUN}` → `data/reports/plots/comparison/{run}/comparison.csv` (step 7).
+*Current system:* fill from `{LATEST_INTEGRATION_BATCH}/summary.json` (step 4) and `{LATEST_COMPARISON_RUN}` → `data/reports/plots/comparison/{run}/` (steps 7–8: `comparison.csv`, `worth_it_summary.md`).
+
+**Reference five-config comparison** (`20260613_025809`, seeds 100–199, corrected latency):
+
+| Config | Success | Mean pred err (m) | Median latency (ms) | Fallback share |
+| :--- | ---: | ---: | ---: | ---: |
+| analytic | 80% | 0.064 | ~561 | 0% |
+| neural_legacy | 46% | 0.185 | ~0.36 | — |
+| neural_structured | 44% | 0.035 | ~0.56 | — |
+| hybrid_legacy | 73% | 0.137 | ~0.88 (p90 ~8) | ~42% |
+| hybrid_structured | 72% | 0.048 | ~0.91 | ~49% |
+
+**Argument supported:** pure neural is not deployment-viable alone; hybrid recovers ~91% of analytic success with bimodal latency (fast network path, ~8 ms fallback sweep); structured variant removes position error but does **not** beat legacy on success (heading/timing remain the limiter).
