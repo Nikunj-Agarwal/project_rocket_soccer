@@ -141,7 +141,15 @@ python -m scripts.analyze_fallback
 python -m scripts.benchmark_scalability   # optional scalability curve
 
 =====================================================================
- ONE-SHOT SHELL SCRIPT (Git Bash / WSL / Linux)
+ ONE-SHOT POWERSHELL SCRIPT (Windows native — recommended)
+=====================================================================
+conda activate striker
+cd D:\SNU\Semester_6\motion_planning\project_retry
+.\run_pipeline.ps1 -SkipData -SkipTrain -NoVideo -LightBench  # fast re-eval
+.\run_pipeline.ps1 -SkipData -SkipTrain -NoVideo               # full benchmark
+.\run_pipeline.ps1                                              # full pipeline from scratch
+
+ ONE-SHOT SHELL SCRIPT (Git Bash / WSL / Linux only)
 =====================================================================
 conda activate striker
 bash run_pipeline.sh                          # full pipeline
