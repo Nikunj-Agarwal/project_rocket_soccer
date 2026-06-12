@@ -1,3 +1,7 @@
+<!--
+DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve them.
+-->
+
 # System Overview — Phase 5 Soccer Striker
 
 ## Problem
@@ -7,72 +11,117 @@ A **robot soccer striker** must intercept a **moving, bouncing ball** on a recta
 
 ## Architecture
 
-The system consists of two major components:
-1. **Offline Pipeline (Imitation Learning)**: Collects reachability and scoring data, trains a multi-layer perceptron (StrikeNet) to predict *when, where, and at what heading* to meet the ball.
-2. **Online Simulation Loop** (single hybrid mode — there is no runtime switch for analytic-only or network-only): Queries StrikeNet for the full strike plan $(T, x, y, \theta)$, validates it with a scoring rollout, and uses the prediction directly when it scores (`target_source = "network"`). When the predicted plan cannot score, an inline analytic fallback propagates the ball to the network's horizon $T$, sweeps 36 headings with the same canonical goal-LoS rule as the dataset labels (`target_source = "fallback"`). `src/planner.py` is used offline for labels and timed at runtime for latency comparison only — it does not drive control. The chosen target receives a backward offset, then a shrinking-horizon NMPC loop executes interception and post-strike braking. Episode success requires both a car–ball strike and a goal (`success = scored AND ball_struck`).
+The system has two major components:
+
+1. **Offline Pipeline (Imitation Learning)** — Generates reachability/scoring labels, trains **two** StrikeNet variants on the same dataset.
+2. **Online Simulation Loop** — Selects a strike target via one of **three planner modes**, optionally using one of **two model variants**, then runs shrinking-horizon NMPC and post-strike braking.
+
+Episode success requires both a car–ball strike and a goal: `success = scored AND ball_struck`.
 
 ```mermaid
 flowchart LR
   subgraph offline [Offline Pipeline]
     DG[data_generator] --> DS[(strike_dataset.npy)]
-    DS --> SN[StrikeNet train, z-scored I/O]
-    SN --> M[(strategy_net.pth)]
+    DS --> SN1[StrikeNet legacy 5-out]
+    DS --> SN2[StrikeNet structured 3-out]
+    SN1 --> M1[(strategy_net_legacy.pth)]
+    SN2 --> M2[(strategy_net_structured.pth)]
   end
 
-  subgraph online [Online Simulation Loop]
-    M --> Pred[StrikeNet predict T,x,y,theta]
-    Pred --> Check{Predicted plan scores?}
-    Check -- Yes --> Offset[Apply 0.32m Offset]
-    Check -- No --> FB[Analytic pos + heading sweep]
+  subgraph online [Online Loop decide_strike_target]
+    Mode{planner_mode}
+    Mode -- analytic --> AP[analytic_strike_plan]
+    Mode -- neural/hybrid --> Net[StrikeNet predict]
+    Net --> Derive{variant?}
+    Derive -- legacy --> Clip[clip x,y to field]
+    Derive -- structured --> Roll[propagate_ball to T]
+    Clip --> Hybrid{hybrid?}
+    Roll --> Hybrid
+    Hybrid -- scores --> UseNet[target_source network]
+    Hybrid -- no score --> FB[heading sweep at ball pos]
+    AP --> Offset[0.32m offset]
+    UseNet --> Offset
     FB --> Offset
     Offset --> MPC[InterceptionMPC]
     MPC --> World[World.step]
-    World --> Collision{Collision?}
-    Collision -- No --> MPC
-    Collision -- "Yes (Phase 2)" --> Brake[Active Braking & Ball Flight]
-    Brake --> GoalCheck{Scored?}
   end
 ```
 
-### Module Responsibilities
+### Planner modes (`--planner-mode`)
+
+| Mode | Model required | Behaviour |
+| :--- | :---: | :--- |
+| **`analytic`** | No | Full `analytic_strike_plan()` from `src/planner.py`. `target_source = "analytic"` or `"analytic_infeasible"`. |
+| **`neural`** | Yes | StrikeNet prediction used directly (no scoring guard). `target_source = "network"`. |
+| **`hybrid`** | Yes | Network plan used when a scoring rollout passes; otherwise inline fallback at network horizon $T$ with 36-heading sweep. `target_source = "network"` or `"fallback"`. |
+
+Implemented in `decide_strike_target()` in [`src/main.py`](../src/main.py).
+
+### Model variants (`--model-variant`)
+
+| Variant | Outputs | Strike position |
+| :--- | :--- | :--- |
+| **`legacy`** | MLP → 5 targets: $T, x, y, \sin\theta, \cos\theta$ | Predicted directly; clipped to field bounds. |
+| **`structured`** | MLP → 3 targets: $T, \sin\theta, \cos\theta$ | **Derived** by `propagate_ball_for_time` to horizon $T$ (on-trajectory by construction). |
+
+Checkpoints: `models/strategy_net_legacy.pth`, `models/strategy_net_structured.pth` (helpers in `src/data_layout.py`). `StrikeNet.load()` auto-detects variant from `output_mean` length.
+
+### Module responsibilities
 
 | Layer | Module | Role |
 | :--- | :--- | :--- |
-| **Strategy** | `src/network.py` — **StrikeNet** | MLP that maps 7-D scene state $\rightarrow$ `[T_strike, x_strike, y_strike, sin(θ), cos(θ)]`. |
-| **Analytic planner** | `src/planner.py` — **`analytic_strike_plan`** | Shared min-$T$ search with reachability check (`max_reach_distance`) and canonical heading selection; used offline in `data_generator`, as the online fallback, and for latency benchmarks. |
-| **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon MPC using CasADi/IPOPT with pursuit-based warm-start to solve kinematic bicycle inputs. |
-| **Simulation** | `src/simulator.py` — **World** | Updates car (RK4 integration) and ball (wall bounce and bumper collision). |
-| **Physics** | `src/ball_physics.py` | Implements shared wall-bounce physics and car-ball elastic collision dynamics. |
-| **Goal** | `src/goal.py` | Models the goal mouth geometry and checks crossing segments for scores. |
-| **Orchestration** | `src/main.py` | Integrates components: queries StrikeNet, builds the strike target from the prediction (with scoring-validated analytic fallback), runs NMPC and post-strike phases. |
-| **Layout** | `src/data_layout.py` | Canonical paths for training logs, dataset, batches, and plots. |
+| **Strategy** | `src/network.py` — **StrikeNet** | MLP: 7-D scene $\rightarrow$ legacy 5-D or structured 3-D (z-scored I/O). |
+| **Analytic planner** | `src/planner.py` — **`analytic_strike_plan`** | Min-$T$ search with `max_reach_distance`; offline labels, `analytic` mode, latency benchmarks. |
+| **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon CasADi/IPOPT with pursuit warm-start. |
+| **Simulation** | `src/simulator.py` — **World** | RK4 car, ball bounce, bumper collision. |
+| **Physics** | `src/ball_physics.py` | Wall bounce, elastic strike velocity, `propagate_ball_for_time`. |
+| **Goal** | `src/goal.py` | Goal mouth geometry and segment crossing. |
+| **Orchestration** | `src/main.py` | `decide_strike_target()`, NMPC loop, metadata logging, CLI flags. |
+| **Layout** | `src/data_layout.py` | Paths for datasets, per-variant models, integration/comparison batches, plots. |
+| **Comparison** | `scripts/compare_modes.py` | Runs 5 configs on shared seeds; writes `comparison.csv` + report. |
 
 ---
 
-## State Vectors & Constants
+## State vectors and constants
 
-### 1. StrikeNet Input (7-D)
+### StrikeNet input (7-D)
 $$\mathbf{x}_{in} = [x_{ball}, y_{ball}, v_{x,ball}, v_{y,ball}, x_{car}, y_{car}, \theta_{car}]$$
 
-### 2. StrikeNet Output (5-D)
+### StrikeNet outputs
+
+**Legacy (5-D train / 4-D predict):**
 $$\mathbf{y}_{out} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
-*Inputs and outputs are both z-scored (statistics stored as registered buffers). `predict()` de-normalizes the output to physical units, then reconstructs $\theta_{strike}$ via `arctan2`.*
 
-### 3. Car State (4-D Kinematic Bicycle)
+**Structured (3-D train / 2-D predict):**
+$$\mathbf{y}_{out} = [T_{strike}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
+
+Inputs and outputs are z-scored; `predict()` de-normalizes and reconstructs $\theta$ via `arctan2`.
+
+### Car state (4-D kinematic bicycle)
 $$\mathbf{q}_{car} = [x, y, \theta, v]^T$$
-* Wheelbase $L = 0.3$ m.
-* Bounds: $v \in [0.0, 2.0]$ m/s, $a \in [-2.0, 2.0]$ m/s², $\delta \in [-\pi/4, \pi/4]$ rad.
+Wheelbase $L = 0.3$ m. Bounds: $v \in [0, 2.0]$ m/s, $a \in [-2.0, 2.0]$ m/s², $\delta \in [-\pi/4, \pi/4]$ rad.
 
-### 4. Ball State
-Position $(x, y)$ and velocity $(v_x, v_y)$. Wall restitution is $e=0.85$. Car bumper restitution is $e_{strike}=0.8$.
-
-### 5. Goal mouth
-Segment along $x = 10.0$ for $y \in [2.0, 4.0]$. Center is $(10.0, 3.0)$.
+### Ball and goal
+Wall restitution $e=0.85$; bumper restitution $e_{strike}=0.8$. Goal: $x=10.0$, $y \in [2.0, 4.0]$.
 
 ---
 
-## System Phases
-* **Phase 1-3**: Interception of static/moving ball (point contact).
-* **Phase 3.6**: Wall-bounce awareness (shared bounce integrator, reachability dataset filter).
-* **Phase 4**: Batch-organized reporting structure (`scripts/generate_plots.py`).
-* **Phase 5**: **Strike & Score** (elastic bumper collisions, goal line scoring checks, active braking, NMPC target offsets).
+## Evaluation harness
+
+| Script | Purpose |
+| :--- | :--- |
+| `scripts/test_main.py` | Single-config integration batch (`--planner-mode`, `--model-variant`, `--batch-dir`). Default: hybrid + legacy, 100 seeds (100–199). |
+| `scripts/compare_modes.py` | Five configs on shared seeds: analytic; neural×{legacy, structured}; hybrid×{legacy, structured}. |
+| `scripts/analyze_fallback.py` | Network vs fallback breakdown (**hybrid batches only**; exits gracefully otherwise). |
+| `scripts/benchmark_scalability.py` | Analytic vs network latency; `--model-variant both` includes structured infer+rollout. |
+
+Full pipeline: `run_pipeline.ps1` / `run_pipeline.sh` (7 steps).
+
+---
+
+## System phases
+* **Phase 1–3**: Interception of static/moving ball.
+* **Phase 3.6**: Wall-bounce awareness, reachability dataset filter.
+* **Phase 4**: Batch-organized reporting (`scripts/generate_plots.py`).
+* **Phase 5**: Strike & Score (elastic collisions, goal scoring, active braking, target offset).
+* **Phase 5+**: Dual-model variants + 3-way planner comparison (`compare_modes.py`).

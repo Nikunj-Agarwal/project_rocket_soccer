@@ -1,7 +1,3 @@
-<!--
-DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve them.
--->
-
 # Physics, Constraints, and Assumptions — Phase 5
 
 ## 🏟️ Field & Goal Geometry
@@ -83,7 +79,7 @@ Offline labels, the online analytic fallback, and scalability benchmarks all cal
   * $d_{max} = 2T - 1$ for $T > 1.0$ s (accel then cruise)
 * **Turn penalty** — effective path length $d_{effective} = d_{straight} + R_{turn}(\Delta\theta_{start} + \Delta\theta_{end})$
   * Exact min turn radius: $R_{turn} = L/\tan(\delta_{max}) = 0.30$ m
-  * **Current default:** $R_{turn} = 0.35$ m (`_R_TURN_LEGACY`) — preserves existing dataset labels; switching to $0.30$ m requires regen + retrain (see [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md))
+  * **Current default:** $R_{turn} = 0.35$ m (`_R_TURN_LEGACY`) — preserves existing dataset labels; switching to $0.30$ m requires regen + retrain (see [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md))
 
 ---
 
@@ -112,6 +108,4 @@ The old closest-approach position threshold ($\le 0.35$ m) is **not** a pass gat
 
 **Diagnostic metrics** (still logged, not pass gates): `contact_pos_err_m`, closest-approach `pos_err` in `trajectory.csv`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`.
 
-*Previous try (`{PREVIOUS_INTEGRATION_BATCH}`, 50 seeds):* 74% strike-gated success (37/50), network 16/26 (61.5%), fallback 21/24 (87.5%).
-
-*Current system:* fill from `{LATEST_INTEGRATION_BATCH}/summary.json` and `{LATEST_COMPARISON_RUN}/comparison.csv` after `run_pipeline.ps1`.
+*Example (50-seed batch `20260612_155705`, pre-100-seed default):* 74% strike-gated success (37/50), network path 16/26 (61.5%), fallback 21/24 (87.5%). Regenerate figures on a current 100-seed batch after `python scripts/test_main.py`.

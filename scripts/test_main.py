@@ -8,6 +8,7 @@ Evaluates goal scoring success, on-field final states, and strike precision metr
 import argparse
 import os
 import sys
+from pathlib import Path
 import numpy as np
 import logging
 import json
@@ -77,7 +78,7 @@ def setup_logging(batch_dir: str) -> logging.Logger:
     logger.info(f"Log file: {log_path}")
     return logger
 
-def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
+def _run_single_seed(seed: int, batch_dir: str, planner_mode: str, model_variant: str, no_video: bool) -> dict:
     """Worker function to run a single seed in an isolated subprocess."""
     try:
         seed_run_dir = integration_seed_run(batch_dir, seed)
@@ -87,8 +88,12 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             sys.executable,
             os.path.join(PROJECT_ROOT, "src", "main.py"),
             "--seed", str(seed),
-            "--run-dir", str(seed_run_dir)
+            "--run-dir", str(seed_run_dir),
+            "--planner-mode", planner_mode,
         ]
+        if planner_mode != "analytic":
+            cmd.extend(["--model-variant", model_variant])
+            
         if not no_video:
             cmd.append("--save-video")
             
@@ -133,6 +138,8 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
         # strike_point_pred_err_m is written by main.py; fall back to NaN for
         # old batches that don't have it yet.
         strike_point_pred_err_m = meta.get("strike_point_pred_err_m", float("nan"))
+        decision_latency_ms = meta.get("decision_latency_ms", float("nan"))
+        fallback_sweep_ms = meta.get("fallback_sweep_ms", 0.0)
 
         # --- Legacy closest-approach distance (diagnostic only) ---
         if history:
@@ -164,6 +171,8 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "unstruck_goal": unstruck_goal,
             "on_field": on_field,
             "strike_point_pred_err_m": strike_point_pred_err_m,
+            "decision_latency_ms": decision_latency_ms,
+            "fallback_sweep_ms": fallback_sweep_ms,
             "contact_dist": contact_dist,
             "contact_heading_err": contact_heading_err,
             "final_ball": final_ball,
@@ -182,6 +191,7 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "unstruck_goal": False,
             "on_field": False,
             "strike_point_pred_err_m": float("nan"),
+            "decision_latency_ms": float("nan"),
             "contact_dist": 999.0,
             "contact_heading_err": 999.0,
             "final_ball": np.array([0, 0]),
@@ -205,10 +215,13 @@ def main():
         action="store_true",
         help="Disable saving simulation videos for faster runs",
     )
+    parser.add_argument("--planner-mode", choices=["analytic","neural","hybrid"], default="hybrid")
+    parser.add_argument("--model-variant", choices=["legacy","structured"], default="legacy")
+    parser.add_argument("--batch-dir", type=str, default=None)
     args = parser.parse_args()
     seeds = args.seeds
 
-    batch_dir = new_integration_batch()
+    batch_dir = Path(args.batch_dir) if args.batch_dir else new_integration_batch()
     log = setup_logging(str(batch_dir))
     log.info(f"Batch directory: {batch_dir}")
     log.info(f"Seeds: {seeds}")
@@ -218,6 +231,10 @@ def main():
     unstruck_goals = 0
     pred_err_vals = []     # strike_point_pred_err_m (new headline metric)
     contact_dists = []     # closest-approach distance (diagnostic only)
+    latencies = []         # decision_latency_ms (deployed path)
+    fb_sweeps = []         # fallback_sweep_ms (hybrid only, when fallback fires)
+    net_latencies = []
+    fb_latencies = []
 
     # Fallback/network tracking
     net_total = 0;   net_success = 0
@@ -239,7 +256,7 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_seed = {
-            executor.submit(_run_single_seed, seed, batch_dir, args.no_video): seed
+            executor.submit(_run_single_seed, seed, batch_dir, args.planner_mode, args.model_variant, args.no_video): seed
             for seed in seeds
         }
 
@@ -269,8 +286,12 @@ def main():
 
                 pred_err = res["strike_point_pred_err_m"]
                 pred_err_str = f"{pred_err:.4f} m" if not np.isnan(pred_err) else "n/a"
+                lat_str = f"{res['decision_latency_ms']:.2f} ms" if not np.isnan(res["decision_latency_ms"]) else "n/a"
                 log.info(f"  Pred err (target vs contact): {pred_err_str}"
-                         f" | contact dist (diag): {res['contact_dist']:.4f} m")
+                         f" | contact dist (diag): {res['contact_dist']:.4f} m"
+                         f" | decision latency: {lat_str}")
+                if res.get("fallback_sweep_ms", 0) > 0:
+                    log.info(f"  Fallback sweep: {res['fallback_sweep_ms']:.2f} ms")
 
                 # Track per-source counts
                 if source == "network":
@@ -287,6 +308,14 @@ def main():
 
             if not np.isnan(res["strike_point_pred_err_m"]):
                 pred_err_vals.append(res["strike_point_pred_err_m"])
+            if not np.isnan(res["decision_latency_ms"]):
+                latencies.append(res["decision_latency_ms"])
+                if source == "network":
+                    net_latencies.append(res["decision_latency_ms"])
+                elif source == "fallback":
+                    fb_latencies.append(res["decision_latency_ms"])
+            if res.get("fallback_sweep_ms", 0) > 0:
+                fb_sweeps.append(res["fallback_sweep_ms"])
             contact_dists.append(res["contact_dist"])
 
             pbar.update(1)
@@ -306,6 +335,12 @@ def main():
     mean_pred_err = np.mean(pred_err_vals) if pred_err_vals else float("nan")
     median_pred_err = np.median(pred_err_vals) if pred_err_vals else float("nan")
     mean_contact = np.mean(contact_dists) if contact_dists else float("nan")
+    mean_decision_latency_ms = np.mean(latencies) if latencies else float("nan")
+    median_decision_latency_ms = np.median(latencies) if latencies else float("nan")
+    p90_decision_latency_ms = float(np.percentile(latencies, 90)) if latencies else float("nan")
+    mean_fallback_sweep_ms = np.mean(fb_sweeps) if fb_sweeps else 0.0
+    median_net_latency_ms = np.median(net_latencies) if net_latencies else float("nan")
+    median_fb_latency_ms = np.median(fb_latencies) if fb_latencies else float("nan")
 
     log.info(f"  Total runs       : {len(seeds)}")
     log.info(f"  Goals (Success)  : {successes} / {len(seeds)}  ({successes/len(seeds)*100:.1f}%)")
@@ -313,11 +348,42 @@ def main():
     log.info(f"  Goals without strike (excluded): {unstruck_goals}")
     log.info(f"  Avg Pred Target Err (strike_point_pred_err_m): {mean_pred_err:.4f} m  [median: {median_pred_err:.4f} m]")
     log.info(f"  Avg Contact Dist (diagnostic only)           : {mean_contact:.4f} m")
+    log.info(f"  Decision Latency (deployed path)             : mean {mean_decision_latency_ms:.3f} ms  "
+             f"| median {median_decision_latency_ms:.3f} ms  | p90 {p90_decision_latency_ms:.3f} ms")
+    if args.planner_mode == "hybrid" and fb_sweeps:
+        log.info(f"  Fallback sweep (when engaged)                : mean {mean_fallback_sweep_ms:.1f} ms")
+        log.info(f"  Latency by path — network median: {median_net_latency_ms:.3f} ms  "
+                 f"| fallback median: {median_fb_latency_ms:.3f} ms")
+    log.info("  (No hard latency pass/fail gate; NMPC control period is 100 ms/step.)")
     log.info("-" * 65)
     log.info("  NETWORK vs FALLBACK BREAKDOWN")
     log.info(f"  [NETWORK ] Episodes: {net_total:>3d}  |  Scored: {net_success:>3d}  |  Success rate: {net_rate:.1f}%")
     log.info(f"  [FALLBACK] Episodes: {fb_total:>3d}  |  Scored: {fb_success:>3d}  |  Success rate: {fb_rate:.1f}%")
     log.info("-" * 65)
+
+    summary = {
+      "planner_mode": args.planner_mode,
+      "model_variant": (None if args.planner_mode == "analytic" else args.model_variant),
+      "n": len(seeds),
+      "successes": successes,
+      "success_rate": successes/len(seeds) if len(seeds) > 0 else 0.0,
+      "unstruck_goals": unstruck_goals,
+      "mean_pred_err_m": float(mean_pred_err),
+      "median_pred_err_m": float(median_pred_err),
+      "mean_contact_dist_m": float(mean_contact),
+      "net_episodes": net_total,
+      "net_success": net_success,
+      "fb_episodes": fb_total,
+      "fb_success": fb_success,
+      "mean_decision_latency_ms": float(mean_decision_latency_ms),
+      "median_decision_latency_ms": float(median_decision_latency_ms),
+      "p90_decision_latency_ms": float(p90_decision_latency_ms),
+      "mean_fallback_sweep_ms": float(mean_fallback_sweep_ms),
+      "median_net_latency_ms": float(median_net_latency_ms),
+      "median_fb_latency_ms": float(median_fb_latency_ms),
+    }
+    with open(os.path.join(batch_dir, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
 
     # Pass criteria: at least 60% success (strike-gated).
     # The old closest-approach threshold (<= 0.35 m) is removed — it was tautological

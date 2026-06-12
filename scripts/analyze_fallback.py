@@ -87,6 +87,8 @@ def load_fallback_data(batch_dir: Path) -> pd.DataFrame:
             "strike_heading_err": contact_heading_err,
             "net_vs_analytic_pos_m": meta.get("net_vs_analytic_pos_m", np.nan),
             "strikenet_infer_ms": meta.get("strikenet_infer_ms", np.nan),
+            "decision_latency_ms": meta.get("decision_latency_ms", np.nan),
+            "fallback_sweep_ms": meta.get("fallback_sweep_ms", np.nan),
             "analytic_strategy_ms": meta.get("analytic_strategy_ms", np.nan),
             "speedup_factor": meta.get("speedup_factor", np.nan),
         })
@@ -256,6 +258,19 @@ def main():
 
     print(f"Analyzing fallback behaviour for batch: {batch_id}")
     df = load_fallback_data(batch_dir)
+
+    # This analysis only makes sense when the network was actually consulted and
+    # could fall back to analytic search (i.e. hybrid mode). Analytic-only and
+    # neural-only batches have no "network"/"fallback" split, so the per-source
+    # plots would be empty/garbage. Exit gracefully instead of crashing.
+    sources_present = set(df["target_source"].unique())
+    if not (sources_present & {"network", "fallback"}):
+        modes = ", ".join(sorted(sources_present)) or "unknown"
+        print(f"  Fallback analysis not applicable: batch has no network/fallback "
+              f"episodes (target_source = {modes}).")
+        print("  This is expected for analytic-only or neural-only batches.")
+        return
+
     stats = _source_stats(df)
 
     plot_fallback_analysis(df, stats, output_dir, batch_id)

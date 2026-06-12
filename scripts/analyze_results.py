@@ -148,6 +148,11 @@ def load_batch_data(batch_dir: Path):
             "strikenet_infer_ms": meta.get("strikenet_infer_ms", None),
             "analytic_strategy_ms": meta.get("analytic_strategy_ms", None),
             "speedup_factor": meta.get("speedup_factor", None),
+            "decision_latency_ms": meta.get("decision_latency_ms", None),
+            "fallback_sweep_ms": meta.get("fallback_sweep_ms", None),
+            # --- Planner configuration (None if batch predates the dual-model work) ---
+            "planner_mode": meta.get("planner_mode", None),
+            "model_variant": meta.get("model_variant", None),
         })
         
         trajectories[seed] = df
@@ -541,43 +546,42 @@ def plot_chattering_phase_portrait(trajectories, output_dir: Path):
 
 def plot_decision_latency(df_runs, output_dir: Path):
     """
-    9. Decision Latency Comparison (StrikeNet vs Analytic Search):
-    Grouped bar chart comparing per-seed inference time with analytic search time on a
-    log-y axis, annotated with the median speedup factor.  Only rendered when latency
-    fields are present in the batch metadata (i.e. batches run after the scalability
-    logging was added).
+    Per-seed deployed decision latency vs analytic search reference (log scale).
+    ``decision_latency_ms`` is wall-clock of the actual planner path, including
+    hybrid fallback sweeps when they fire.
     """
-    latency_cols = ["strikenet_infer_ms", "analytic_strategy_ms", "speedup_factor"]
-    if df_runs[latency_cols].isnull().all().all():
-        print("  Skipping decision latency plot (no latency data in this batch).")
+    if "decision_latency_ms" not in df_runs.columns:
+        print("  Skipping decision latency plot (no decision_latency_ms in batch).")
         return
 
-    df_lat = df_runs.dropna(subset=latency_cols).copy()
+    df_lat = df_runs.dropna(subset=["decision_latency_ms"]).copy()
     if df_lat.empty:
-        print("  Skipping decision latency plot (all runs lack latency fields).")
+        print("  Skipping decision latency plot (all runs lack decision_latency_ms).")
         return
+
+    has_analytic = df_lat["analytic_strategy_ms"].notna().any()
 
     fig, ax = plt.subplots(figsize=(10, 5))
-
     x = np.arange(len(df_lat))
-    width = 0.38
+    width = 0.38 if has_analytic else 0.6
 
-    ax.bar(x - width / 2, df_lat["strikenet_infer_ms"], width,
-           label="StrikeNet inference (CPU)", alpha=0.85)
-    ax.bar(x + width / 2, df_lat["analytic_strategy_ms"], width,
-           label="Analytic search", alpha=0.85)
+    ax.bar(x - (width / 2 if has_analytic else 0), df_lat["decision_latency_ms"], width,
+           label="Deployed decision path", alpha=0.85, color="#1f77b4")
+    if has_analytic:
+        ax.bar(x + width / 2, df_lat["analytic_strategy_ms"], width,
+               label="Analytic search (30-rep ref)", alpha=0.85, color="#ff7f0e")
 
-    median_speedup = df_lat["speedup_factor"].median()
+    med_deployed = df_lat["decision_latency_ms"].median()
+    med_speedup = (df_lat["analytic_strategy_ms"] / df_lat["decision_latency_ms"].clip(lower=1e-6)).median() if has_analytic else float("nan")
     ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels([f"s{s}" for s in df_lat["seed"].astype(int)], rotation=45, fontsize=7)
     ax.set_xlabel("Seed", fontsize=11)
     ax.set_ylabel("Decision latency (ms, log scale)", fontsize=11)
-    ax.set_title(
-        f"Online Decision Latency: StrikeNet vs Analytic Search\n"
-        f"Median speedup: {median_speedup:.1f}×  (n={len(df_lat)} runs)",
-        fontsize=12, fontweight="bold",
-    )
+    title = f"Deployed Decision Latency (median {med_deployed:.2f} ms, n={len(df_lat)})"
+    if has_analytic and not np.isnan(med_speedup):
+        title += f"\nMedian speedup vs analytic ref: {med_speedup:.1f}x"
+    ax.set_title(title, fontsize=12, fontweight="bold")
     ax.legend(fontsize=10)
     ax.grid(True, which="both", axis="y", alpha=0.35)
     fig.tight_layout()
@@ -691,6 +695,18 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
     import datetime
     eval_date = datetime.date.today().isoformat()
 
+    # Planner configuration for this batch (constant across seeds in a batch).
+    def _dominant(col):
+        if col not in df_runs.columns:
+            return None
+        vals = [v for v in df_runs[col].tolist() if v is not None and not (isinstance(v, float) and pd.isna(v))]
+        return vals[0] if vals else None
+    planner_mode = _dominant("planner_mode") or "unknown (legacy batch)"
+    model_variant = _dominant("model_variant")
+    config_line = f"**Planner mode:** `{planner_mode}`"
+    if model_variant:
+        config_line += f"  |  **Model variant:** `{model_variant}`"
+
     # Generate LaTeX code
     latex_stats_rows = []
     for row in stats_data:
@@ -718,6 +734,7 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
 **Motion Planning & Control Lab — Phase 5 striker NMPC System**
 **Batch Reference ID:** `{batch_id}`
 **Evaluation Date:** {eval_date}
+{config_line}
 **Sample Size ($N$):** {n_seeds} Runs
 
 ---

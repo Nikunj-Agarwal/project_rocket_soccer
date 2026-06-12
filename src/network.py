@@ -13,27 +13,22 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader, random_split
 
 class StrikeNet(nn.Module):
-    def __init__(self):
-        super(StrikeNet, self).__init__()
-        # 7 inputs: ball_x, ball_y, ball_vx, ball_vy, car_x, car_y, car_theta
-        # 5 outputs: T_strike, x_strike, y_strike, sin(theta_strike), cos(theta_strike)
+    def __init__(self, variant: str = "legacy"):
+        super().__init__()
+        assert variant in ("legacy", "structured")
+        self.variant = variant
+        out_dim = 5 if variant == "legacy" else 3   # legacy: T,x,y,sin,cos ; structured: T,sin,cos
         self.net = nn.Sequential(
-            nn.Linear(7, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 5)
+            nn.Linear(7, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU(),
+            nn.Linear(64, out_dim),
         )
         
-        # We will save normalization parameters in the model state.
-        # Outputs are z-scored too so the MSE loss weights T/x/y and the
-        # sin/cos heading terms comparably (raw scales differ by ~5-10x).
         self.register_buffer('input_mean', torch.zeros(7))
         self.register_buffer('input_std', torch.ones(7))
-        self.register_buffer('output_mean', torch.zeros(5))
-        self.register_buffer('output_std', torch.ones(5))
+        self.register_buffer('output_mean', torch.zeros(out_dim))
+        self.register_buffer('output_std', torch.ones(out_dim))
         
     def forward(self, x):
         # x shape: (batch_size, 7)
@@ -42,11 +37,6 @@ class StrikeNet(nn.Module):
         return self.net(x_norm)
     
     def predict(self, x):
-        """
-        Convenience method for inference.
-        x: tensor or numpy array of shape (7,) or (N, 7)
-        Returns: numpy array of [T_strike, x_strike, y_strike, theta_strike]
-        """
         self.eval()
         device = self.input_mean.device
         with torch.no_grad():
@@ -56,26 +46,28 @@ class StrikeNet(nn.Module):
                 x = x.to(device)
             if x.dim() == 1:
                 x = x.unsqueeze(0)
-            
-            # Forward pass (z-scored) then de-normalize to physical units
-            out = self(x)  # (N, 5)
-            out = out * (self.output_std + 1e-8) + self.output_mean
-            
-            # Extract outputs
+            out = self(x) * (self.output_std + 1e-8) + self.output_mean
             T = out[:, 0].cpu().numpy()
-            x_s = out[:, 1].cpu().numpy()
-            y_s = out[:, 2].cpu().numpy()
-            sin_t = out[:, 3].cpu().numpy()
-            cos_t = out[:, 4].cpu().numpy()
-            
-            # Reconstruct theta from sin and cos
-            theta = np.arctan2(sin_t, cos_t)
-            
-            # Shape (N, 4)
-            preds = np.column_stack([T, x_s, y_s, theta])
+            if self.variant == "legacy":
+                x_s = out[:, 1].cpu().numpy(); y_s = out[:, 2].cpu().numpy()
+                theta = np.arctan2(out[:, 3].cpu().numpy(), out[:, 4].cpu().numpy())
+                preds = np.column_stack([T, x_s, y_s, theta])   # (N,4)
+            else:
+                theta = np.arctan2(out[:, 1].cpu().numpy(), out[:, 2].cpu().numpy())
+                preds = np.column_stack([T, theta])             # (N,2)
             return preds[0] if preds.shape[0] == 1 else preds
 
-def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
+    @classmethod
+    def load(cls, path, map_location="cpu"):
+        sd = torch.load(path, map_location=map_location)
+        out_dim = sd["output_mean"].numel()
+        variant = "legacy" if out_dim == 5 else "structured"
+        model = cls(variant=variant)
+        model.load_state_dict(sd)
+        model.eval()
+        return model
+
+def train(data_path: str, model_path: str, log_path: str, seed: int = 42, variant: str = "legacy"):
     # Set seeds for research reproducibility
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -97,9 +89,14 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
     y_s = outputs[:, 2]
     theta_s = outputs[:, 3]
     
-    outputs_transformed = np.column_stack([
-        T_s, x_s, y_s, np.sin(theta_s), np.cos(theta_s)
-    ])
+    if variant == "legacy":
+        outputs_transformed = np.column_stack([
+            T_s, x_s, y_s, np.sin(theta_s), np.cos(theta_s)
+        ])
+    else:
+        outputs_transformed = np.column_stack([
+            T_s, np.sin(theta_s), np.cos(theta_s)
+        ])
     
     # Create tensors
     X = torch.tensor(inputs, dtype=torch.float32)
@@ -115,7 +112,7 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
     test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
     
     # Initialize model
-    model = StrikeNet()
+    model = StrikeNet(variant=variant)
     
     # Calculate input/output normalization from the training split only
     train_indices = train_dataset.indices
@@ -197,9 +194,13 @@ def train(data_path: str, model_path: str, log_path: str, seed: int = 42):
     print(f"Training log saved to {log_path}.")
 
 if __name__ == "__main__":
-    from src.data_layout import STRIKE_DATASET, TRAINING_LOG
-
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    model_path = os.path.join(project_root, "models", "strategy_net.pth")
-
-    train(str(STRIKE_DATASET), model_path, str(TRAINING_LOG))
+    import argparse
+    from src.data_layout import STRIKE_DATASET, model_path_for_variant, training_log_for_variant
+    p = argparse.ArgumentParser()
+    p.add_argument("--variant", choices=["legacy", "structured", "both"], default="both")
+    a = p.parse_args()
+    variants = ["legacy", "structured"] if a.variant == "both" else [a.variant]
+    for v in variants:
+        print(f"\n=== Training StrikeNet variant: {v} ===")
+        train(str(STRIKE_DATASET), str(model_path_for_variant(v)),
+              str(training_log_for_variant(v)), variant=v)

@@ -1,144 +1,198 @@
-# Data Layout and Report Plots — Phase 5
+<!--
+DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve them.
+-->
 
-Path helpers are defined in `src/data_layout.py`. This document describes the file layout, how to link evaluation plots back to their raw runs, and the database schema of outputs.
+# Data Layout and Report Plots — Phase 5+
+
+Path helpers: [`src/data_layout.py`](../src/data_layout.py). This document describes directories, metadata schema, and how to link plots back to raw runs.
 
 ---
 
-## 📁 Directory Structure
+## Directory structure
 
 ```text
 project_root/
 ├── data/
 │   ├── dataset/
-│   │   ├── strike_dataset.npy            # Generated training dataset
-│   │   └── dataset_stats.json            # Offline generation cost (wall-clock, per-sample search time)
+│   │   ├── strike_dataset.npy
+│   │   └── dataset_stats.json
 │   ├── training/
-│   │   └── training_log.csv              # MSE metrics per training epoch
+│   │   ├── training_log_legacy.csv
+│   │   └── training_log_structured.csv
 │   ├── reports/
 │   │   ├── benchmarks/
-│   │   │   └── scalability.csv           # Analytic-vs-network latency sweep (benchmark_scalability.py)
+│   │   │   └── scalability.csv          # variant column when --model-variant both
 │   │   └── plots/
-│   │       ├── README.md                 # Index of all generated test batches
-│   │       ├── global/                   # Batch-independent statistics
+│   │       ├── global/
 │   │       │   ├── training_curve.png
 │   │       │   ├── strikenet_sample_errors.png
-│   │       │   └── scalability_curve.png # Amortization: analytic search vs StrikeNet inference
-│   │       └── integration/{batch_id}/   # Specific test batch directory
-│   │           ├── README.md             # Summary links of seeds
-│   │           ├── integration_summary.png
-│   │           ├── decision_latency.png  # Per-seed StrikeNet vs analytic latency
-│   │           ├── fallback_analysis.png # Network-vs-fallback breakdown (analyze_fallback.py)
-│   │           ├── fallback_summary.md   # Network-vs-fallback report + per-seed CSV
-│   │           ├── research_summary.md   # Full diagnostics report (analyze_results.py)
-│   │           └── seed_{N}/
-│   │               ├── trajectory.png    # Vehicle and ball paths
-│   │               └── errors.png        # Tracking errors vs steps
+│   │       │   └── scalability_curve.png
+│   │       ├── integration/{batch_id}/
+│   │       │   ├── integration_summary.png
+│   │       │   ├── decision_latency.png
+│   │       │   ├── fallback_analysis.png    # hybrid batches only
+│   │       │   ├── fallback_summary.md
+│   │       │   ├── research_summary.md
+│   │       │   └── seed_{N}/
+│   │       └── comparison/{run_id}/         # from compare_modes.py
+│   │           ├── comparison.csv
+│   │           ├── comparison_summary.md
+│   │           └── comparison_bars.png
 │   └── tests/
-│       └── integration/{batch_id}/       # Raw test run logs & data
-│           ├── batch.log                 # Batch execution output
-│           └── seed_{N}/
-│               ├── trajectory.csv        # Numerical step series
-│               ├── simulation.mp4        # Rendered trajectory video
-│               └── metadata.json         # Episode configuration & metrics
-├── docs/
-│   ├── legacy/                           # Historic pre-Phase 5 documents
-│   │   ├── DATA_AND_REPORTS.md
-│   │   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
-│   │   ├── PIPELINE_LOGIC.md
-│   │   ├── README.md
-│   │   └── SYSTEM_OVERVIEW.md
-│   ├── DATA_AND_REPORTS.md               # (This document)
-│   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
-│   ├── PIPELINE_LOGIC.md
-│   ├── SYSTEM_OVERVIEW.md
-│   ├── UPDATE.md                         # Detailed update summary
-│   └── README.md                         # Docs index
-└── models/
-    └── strategy_net.pth                  # Trained StrikeNet PyTorch weights
+│       ├── integration/{batch_id}/          # test_main.py default output
+│       │   ├── batch.log
+│       │   ├── summary.json                 # aggregate metrics per batch
+│       │   └── seed_{N}/
+│       │       ├── trajectory.csv
+│       │       ├── simulation.mp4
+│       │       └── metadata.json
+│       └── comparison/{run_id}/             # compare_modes.py
+│           ├── analytic/
+│           ├── neural_legacy/
+│           ├── neural_structured/
+│           ├── hybrid_legacy/
+│           └── hybrid_structured/           # each subfolder = full integration batch
+├── models/
+│   ├── strategy_net_legacy.pth
+│   ├── strategy_net_structured.pth
+│   └── strategy_net.pth                     # backward-compat alias (legacy)
+└── docs/                                      # live docs (archives: legacy/, legacy_2/)
 ```
 
 ---
 
-## 🏷️ Batch ID
-Integration test batches are organized by timestamp:
+## Batch and run IDs
+
+Integration and comparison runs use timestamp folders:
+
 ```text
 YYYYMMDD_HHMMSS
 ```
-*Example*: `20260522_035708` matches the run initiated on May 22, 2026 at 03:57:08.
+
+Resolve latest integration batch:
+
+```powershell
+python -c "from src.data_layout import latest_integration_batch; b=latest_integration_batch(); print(b)"
+```
+
+Comparison runs: newest folder under `data/tests/comparison/`.
 
 ---
 
-## 🔄 Linking Plots to Raw Runs
+## Linking plots to raw runs
 
-| To find the source of: | Look in this directory: |
+| Artifact | Source |
 | :--- | :--- |
-| **Trajectory plot** `seed_10/trajectory.png` | `data/tests/integration/{batch_id}/seed_10/` |
-| **Numeric series for errors** | `data/tests/integration/{batch_id}/seed_10/trajectory.csv` |
-| **Evaluation video** | `data/tests/integration/{batch_id}/seed_10/simulation.mp4` |
-| **Goal pass/fail metadata** | `data/tests/integration/{batch_id}/seed_10/metadata.json` |
+| `integration/{batch}/seed_10/trajectory.png` | `data/tests/integration/{batch}/seed_10/` |
+| Numeric series | `.../trajectory.csv` |
+| Video | `.../simulation.mp4` |
+| Per-seed metrics | `.../metadata.json` |
+| Batch aggregate | `data/tests/integration/{batch}/summary.json` |
+| 5-way comparison table | `data/reports/plots/comparison/{run}/comparison.csv` |
 
 ---
 
-## 📈 Generating Report Plots
-To regenerate plots for the latest integration batch:
+## Generating report plots
+
 ```powershell
+# Latest integration batch
 python scripts/generate_plots.py
-```
-Or for a specific historical batch:
-```powershell
-python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
+python scripts/analyze_results.py
+python -m scripts.analyze_fallback          # hybrid batches only
+
+# Specific batch (replace placeholder)
+python scripts/generate_plots.py --batch {LATEST_INTEGRATION_BATCH}
+python -m scripts.analyze_fallback --batch {LATEST_INTEGRATION_BATCH}
+
+# Comparison report (after compare_modes.py)
+# → data/reports/plots/comparison/{LATEST_COMPARISON_RUN}/
 ```
 
 ---
 
-## 📝 Output Formats
+## Output formats
 
-### 1. `trajectory.csv` Column Fields
+### `trajectory.csv`
 
-| Column | Data Type | Meaning |
+| Column | Meaning |
+| :--- | :--- |
+| `step`, `phase`, `N_rem` | Time index, `approach` / `post_strike`, remaining horizon |
+| `car_x`, `car_y`, `car_theta`, `car_v` | Bicycle state |
+| `ball_x`, `ball_y` | Ball position |
+| `u_acc`, `u_steer` | NMPC controls |
+| `pos_err`, `heading_err` | **Diagnostic** closest-approach / heading vs strike $\theta$ |
+| `solve_ms` | NMPC solve time |
+
+### `metadata.json` (per seed)
+
+**Success and accuracy**
+
+| Field | Type | Meaning |
 | :--- | :--- | :--- |
-| `step` | int | Simulation time step index. |
-| `phase` | str | `"approach"` (NMPC phase) or `"post_strike"` (coasting/braking phase). |
-| `N_rem` | int | Remaining NMPC horizon (0 in Phase 2). |
-| `car_x`, `car_y`, `car_theta`, `car_v` | float | State variables of the kinematic bicycle model. |
-| `ball_x`, `ball_y` | float | Coordinates of the ball center. |
-| `u_acc` | float | Input acceleration command. |
-| `u_steer` | float | Input steering angle command. |
-| `pos_err` | float | Distance between the car center and the ball center. **Diagnostic only** — minimum during `approach` is closest-approach distance (tautologically $< 0.35$ m when contact occurs). |
-| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). **Diagnostic only** — value at minimum-`pos_err` step. |
-| `solve_ms` | float | Execution time of NMPC solver in milliseconds. |
+| `success` | bool | Strike-gated: `scored AND ball_struck` |
+| `scored`, `ball_struck` | bool | Raw physics flags |
+| `strike_point_pred_err_m` | float | $\|\text{strike\_target}_{xy} - \text{ball\_at\_contact}\|$; NaN if no contact |
+| `strike_time_err_s` | float | Timing error vs $N_{steps}$ |
+| `ball_at_strike` | list/null | Ball position at contact |
 
-### 2. `metadata.json` Fields
+**Planner configuration**
 
-* `success` (bool): **Strike-gated research metric** — `True` if `scored AND ball_struck`. Goals entered without car contact are excluded.
-* `scored` (bool): Raw physics flag — ball segment crossed the goal mouth.
-* `ball_struck` (bool): Raw physics flag — car–ball contact occurred (`dist < 0.35` m).
-* `strike_point_pred_err_m` (float): Headline accuracy — $\|\text{strike\_target}_{xy} - \text{ball\_at\_contact}\|$. `NaN` if no contact.
-* `strike_time_err_s` (float): Headline timing error — $|\text{strike\_step} - N_{steps}| \cdot \Delta t$. `NaN` if no contact.
-* `ball_at_strike` (list or null): `[x, y]` ball position at contact; `null` if no strike.
-* `contact_pos_err_m` (float): **Diagnostic** — closest-approach distance at end of approach (alias of legacy `final_pos_err_m`).
-* `final_pos_err_m` (float): **Diagnostic** — same as `contact_pos_err_m` (kept for backward compatibility).
-* `final_heading_err_rad` (float): **Diagnostic** — heading error at closest approach.
-* `solver_failures` (int): Number of steps NMPC failed to converge.
-* `N_steps` (int): Interception horizon steps.
-* `T_final_s` (float): Predicted interception time.
-* `ball_restitution` (float): Wall coefficient of restitution.
-* `field_size_m` (list of float): `[W, H]`.
-* `strike_target` (list of float): `[x_target, y_target, theta_target]` — the chosen strike point and heading (from StrikeNet when `target_source == "network"`, else from the analytic fallback).
-* `target_source` (str): `"network"` if StrikeNet's predicted strike point/heading passed the scoring rollout and was used directly, or `"fallback"` if the analytic strike point + heading sweep was substituted.
-* `net_vs_analytic_pos_m` (float): Distance between StrikeNet's predicted strike position and the analytically propagated ball position at `T_final`. Diagnostic for network spatial prediction quality.
-* `strike_step` (int): The step index where collision occurred (`null`/absent if no strike).
-* `strikenet_infer_ms` (float): Median StrikeNet inference latency on CPU over `timing_repeats` warm-up-discarded repetitions (online decision-layer cost).
-* `analytic_strategy_ms` (float): Median latency of the equivalent analytic strike search on the same scene (timed for comparison only; does not drive control).
-* `speedup_factor` (float): `analytic_strategy_ms / strikenet_infer_ms` — the per-decision amortization factor.
-* `timing_device` (str): Device used for the latency comparison (e.g. `"cpu"`).
-* `timing_repeats` (int): Number of timed repetitions used for the medians.
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `planner_mode` | str | `"analytic"`, `"neural"`, or `"hybrid"` |
+| `model_variant` | str/null | `"legacy"` or `"structured"`; null for analytic |
+| `target_source` | str | `"analytic"`, `"analytic_infeasible"`, `"network"`, or `"fallback"` |
 
-### 3. `dataset_stats.json` Fields (offline generation cost)
+**Strike target and diagnostics**
 
-* `num_samples`, `total_attempts`, `acceptance_rate`: dataset size and search yield.
-* `wall_clock_s`: real elapsed time of the parallel generation run.
-* `total_cpu_search_s`: summed per-worker search time across all accepted samples.
-* `num_workers`: parallel worker processes used.
-* `mean_search_s_per_valid_sample`, `median_search_s_per_valid_sample`, `mean_search_s_per_attempt`: per-sample offline search cost (the expense amortized by StrikeNet).
-* `generation_params`: field/physics and search-grid parameters (`n_angles`, `t_min`, `t_max`, `t_step`) for provenance.
+| Field | Meaning |
+| :--- | :--- |
+| `strike_target` | `[x, y, theta]` chosen strike point |
+| `contact_pos_err_m` / `final_pos_err_m` | Closest-approach distance (diagnostic) |
+| `final_heading_err_rad` | Heading error at closest approach |
+| `net_vs_analytic_pos_m` | Legacy network: predicted $(x,y)$ vs propagated ball at $T$ |
+| `N_steps`, `T_final_s`, `strike_step` | Horizon and contact timing |
+
+**Latency**
+
+| Field | Meaning |
+| :--- | :--- |
+| `decision_latency_ms` | **Deployed path** wall-clock of `decide_strike_target()` — includes inference, ball rollout, scoring checks, and hybrid fallback sweep when it fires |
+| `fallback_sweep_ms` | Portion of `decision_latency_ms` spent in the 36-heading scoring sweep (hybrid fallback only; 0 otherwise) |
+| `strikenet_infer_ms` | 30-rep median CPU inference micro-benchmark (diagnostic reference) |
+| `rollout_ms` | 30-rep median ball rollout micro-benchmark (structured variant diagnostic) |
+| `infer_plus_rollout_ms` | Sum of infer + rollout micro-benchmarks (diagnostic) |
+| `analytic_strategy_ms` | 30-rep median analytic search on same scene (diagnostic reference) |
+| `speedup_factor` | `analytic_strategy_ms / decision_latency_ms` |
+| `timing_device`, `timing_repeats` | Timing protocol |
+
+**Pass/fail:** integration tests gate on **strike-gated success rate** (≥60%), not latency. NMPC control period is 100 ms/step (`dt=0.1`); per-step solve times are in `trajectory.csv` → `solve_ms`.
+
+### `summary.json` (per integration batch)
+
+Written by `scripts/test_main.py`:
+
+```json
+{
+  "planner_mode": "hybrid",
+  "model_variant": "legacy",
+  "n": 100,
+  "successes": 0,
+  "success_rate": 0.0,
+  "mean_pred_err_m": 0.0,
+  "mean_decision_latency_ms": 0.0,
+  "net_episodes": 0,
+  "fb_episodes": 0,
+  ...
+}
+```
+
+Fill numeric fields from the batch produced by your pipeline run (see placeholder note at top).
+
+### `comparison.csv` (per comparison run)
+
+One row per config (`config_name`, `success_rate`, `mean_pred_err_m`, `mean_decision_latency_ms`, `fallback_share`, …). Generated by `scripts/compare_modes.py`.
+
+### `dataset_stats.json`
+
+Offline generation cost: `wall_clock_s`, `mean_search_s_per_valid_sample`, `generation_params`, etc.

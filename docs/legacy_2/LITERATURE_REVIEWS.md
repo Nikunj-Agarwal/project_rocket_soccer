@@ -1,12 +1,6 @@
-<!--
-DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve them.
--->
-
 # Literature Review and Academic References
 
-This document compiles peer-reviewed papers, conference proceedings, and technical methodologies relevant to the **Autonomous Soccer Striker (StrikeNet + NMPC)** project. These references support the academic formulation in [RESEARCH_PAPER.md](RESEARCH_PAPER.md).
-
-The **current system** adds a structured StrikeNet variant (physics-informed position derivation) and three planner modes for ablation; the hybrid IL-MPC motivation below still applies to both variants.
+This document compiles peer-reviewed papers, conference proceedings, and technical methodologies relevant to the **Autonomous Soccer Striker (StrikeNet + NMPC)** project. These references are categorized by domain to support the academic formulation in [docs/RESEARCH_PAPER.md](file:///d:/SNU/Semester_6/motion_planning/project_retry/docs/RESEARCH_PAPER.md).
 
 ---
 

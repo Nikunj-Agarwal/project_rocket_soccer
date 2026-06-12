@@ -1,8 +1,8 @@
 # Robot Soccer Striker — Motion Planning
 
-Closed-loop striker: **StrikeNet** predicts when/where to intercept the ball; **NMPC** drives the car; **World** simulates the kinematic bicycle and bouncing ball, detecting elastic collisions to redirect the ball into the goal.
+Closed-loop striker: **StrikeNet** (legacy or structured variant) predicts when/how to intercept; **NMPC** drives the car; **World** simulates the kinematic bicycle and bouncing ball with elastic collisions.
 
-**Documentation:** [docs/README.md](docs/README.md) — system overview, physics/constraints, pipeline logic, data & report plots, and phase updates.
+**Documentation:** [docs/README.md](docs/README.md) — architecture, physics, pipeline, data layout, research paper (previous try vs current), and phase updates.
 
 ## Setup
 
@@ -14,8 +14,6 @@ pip install imageio imageio-ffmpeg
 
 ### GPU PyTorch (RTX 40-series / CUDA 12.6 driver)
 
-Plain `pip install torch` often installs **CPU-only** (`2.x.x+cpu`). For NVIDIA GPU training:
-
 ```powershell
 conda activate striker
 pip uninstall torch torchvision torchaudio -y
@@ -25,68 +23,80 @@ pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cu126
 Verify:
 
 ```powershell
-python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"
 ```
 
-Expect `2.12.0+cu126` and `CUDA: True`. You do **not** need the full CUDA Toolkit — only an up-to-date NVIDIA driver.
-
-Use the **striker** env for all commands below (`conda activate striker` or full path to `striker\python.exe`).
-
-## Full pipeline from scratch
+## Full pipeline (recommended)
 
 ```powershell
 conda activate striker
 cd D:\SNU\Semester_6\motion_planning\project_retry
 
-# 1) Dataset (scoring-aware labels, 1D theta sweep)
+# All 7 steps: data → train both variants → sanity → integration → reports → benchmark → comparison
+.\run_pipeline.ps1 -NoVideo
+```
+
+Steps: see [docs/PIPELINE_LOGIC.md](docs/PIPELINE_LOGIC.md). Results paths use `{LATEST_INTEGRATION_BATCH}` and `{LATEST_COMPARISON_RUN}` — see [docs/README.md](docs/README.md) placeholder note.
+
+## Manual step-by-step
+
+```powershell
+# 1) Dataset
 python -m src.data_generator --num_samples 100000
 
-# 2) Train StrikeNet (uses GPU if CUDA available)
-python -m src.network
+# 2) Train both StrikeNet variants
+python -m src.network --variant both
 
-# 3) Integration test — 100 seeds (100–199), each with trajectory + simulation.mp4 + metadata
-python scripts/test_main.py
+# 3) Sanity check
+python scripts/test_network.py
 
-# 4) Report plots → data/reports/plots/integration/{batch_id}/seed_{N}/
+# 4) Integration test (default: hybrid + legacy, 100 seeds)
+python scripts/test_main.py --no-video
+
+# 5) Reports
 python scripts/generate_plots.py
-python scripts/generate_plots.py --batch 20260522_035708
+python scripts/analyze_results.py
+python -m scripts.analyze_fallback    # hybrid batches only
+
+# 6) Scalability (both variants)
+python -m scripts.benchmark_scalability --model-variant both
+
+# 7) Five-config comparison
+python scripts/compare_modes.py
 ```
 
-Custom seeds:
+### Planner modes and variants
 
 ```powershell
-python scripts/test_main.py --seeds 10 21 32 43 54 7 14 28 35 42
-```
+python src/main.py --seed 10 --planner-mode analytic
+python src/main.py --seed 10 --planner-mode neural --model-variant legacy
+python src/main.py --seed 10 --planner-mode hybrid --model-variant structured --save-video
 
-Single manual demo:
-
-```powershell
-python src/main.py --seed 10 --save-video
+python scripts/test_main.py --planner-mode neural --model-variant structured --no-video
 ```
 
 ## Project layout
 
 | Path | Role |
 |------|------|
-| `src/simulator.py` | World dynamics (RK4 car, ball propagation) + rendering |
-| `src/ball_physics.py` | Shared inelastic wall bounce and elastic car-ball collision models |
-| `src/goal.py` | Goal mouth segment definition and scoring check |
-| `src/nmpc_solver.py` | CasADi shrinking-horizon MPC with pursuit-based warm-start and silenced solver logging |
-| `src/network.py` | StrikeNet MLP (7-D input to 5-D output) |
-| `src/planner.py` | Shared analytic strike search (`analytic_strike_plan`, `max_reach_distance`) |
-| `src/main.py` | Closed-loop two-phase simulation (network + scoring-guard fallback) |
-| `src/data_layout.py` | Canonical `data/` paths |
-| `scripts/` | Tests and `generate_plots.py` |
-| `models/strategy_net.pth` | Trained StrikeNet weights |
-| `data/` | Datasets, runs, tests, plots — see [`data/README.md`](data/README.md) |
+| `src/main.py` | `decide_strike_target()`; modes: `analytic`, `neural`, `hybrid` |
+| `src/network.py` | StrikeNet variants: `legacy` (5-out), `structured` (3-out) |
+| `src/planner.py` | `analytic_strike_plan`, `max_reach_distance` |
+| `src/data_layout.py` | Paths for models, integration/comparison batches, plots |
+| `scripts/compare_modes.py` | 5-config comparison harness |
+| `scripts/test_main.py` | Integration batches + `summary.json` |
+| `models/strategy_net_{legacy,structured}.pth` | Trained weights |
+| `data/` | Datasets, runs, tests, reports — [data/README.md](data/README.md) |
+| `run_pipeline.ps1` / `run_pipeline.sh` | End-to-end 7-step pipeline |
 
 ## Phases
 
-1. Simulator + NMPC (static target)  
+1. Simulator + NMPC  
 2. Dataset + StrikeNet  
-3. Real-time interception loop  
-3.6. Full-pipeline ball bounce  
+3. Real-time interception  
+3.6. Ball bounce pipeline  
 4. Report plots  
-5. **Strike & Score** (elastic bumper collisions, goal line scoring checks, active braking, target offset)
+5. Strike & Score  
+5+. Dual-model variants + 3-way planner comparison  
 
 Details: `data/phase_archives/`

@@ -1,7 +1,3 @@
-<!--
-DOC PLACEHOLDERS — see docs/README.md for token definitions and how to resolve them.
--->
-
 # Phase 5 System Upgrades — Strike & Score Overhaul
 
 This document details the transition from **Phase 3.6 (Interception with wall bounces)** to **Phase 5 (Strike & Score)**. The system has evolved from a simple "reach-and-face" interceptor to a fully physical soccer striker that redirects a bouncing ball into a goal mouth and comes to a safe stop.
@@ -58,7 +54,7 @@ A logical/mathematical audit found that the original Phase 5 online loop **disca
 | **Post-strike window** | 50 steps (5.0 s). | 80 steps (8.0 s), early-break on score. | Late/slow strikes were cut off mid-flight (e.g. seed 120) before the ball crossed the line. |
 | **Plot/diagnostic fixes** | $\theta$ error unwrapped; stale goal marker at $(9.5, 3.0)$; wrong constants in `analyze_results.py`. | Wrapped $\theta$ error; goal drawn as true segment $x=10, y\in[2,4]$; corrected $\Delta t$, $a_{max}$, $\delta_{max}$, control-period constants. | Accurate reporting. |
 
-> **Note:** After these changes the dataset and model schema changed, so `strike_dataset.npy` and model checkpoints must be regenerated (`python -m src.data_generator` then `python -m src.network --variant both`). Old single-file checkpoints may not load (missing normalization buffers, by design).
+> **Note:** After these changes the dataset and model schema changed, so `strike_dataset.npy` and `strategy_net.pth` must be regenerated (`python -m src.data_generator` then `python -m src.network`). The old checkpoint will not load (missing normalization buffers, by design).
 
 ---
 
@@ -70,29 +66,7 @@ A logical/mathematical audit found that the original Phase 5 online loop **disca
 | **2 — Headline metrics** | New metadata: `strike_point_pred_err_m`, `strike_time_err_s`, `ball_at_strike`. Closest-approach distance demoted to diagnostic (`contact_pos_err_m` / `final_pos_err_m` alias). Integration pass criterion is **60% success only** — the old $\le 0.35$ m contact threshold removed (tautological at `CONTACT_RADIUS`). | `src/main.py`, `scripts/test_main.py` |
 | **3 — Shared planner module** | Analytic search refactored into `src/planner.py` (`analytic_strike_plan`, `max_reach_distance`). Car constants from NMPC; $R_{turn}$ default still **0.35 m** (legacy) — behaviour unchanged, no dataset regen needed. | `src/planner.py`, `src/data_generator.py`, `src/main.py` |
 
-**Runtime architecture note (pre–dual-model):** At this stage only hybrid mode existed at runtime. See **§ Dual-Model + 3-Way Comparison** below for the current selectable modes.
-
----
-
-## 🔀 Dual-Model + 3-Way Comparison (Current System)
-
-This upgrade keeps the **legacy** StrikeNet (predicts $T, x, y, \theta$) for comparison and adds a **structured** variant (predicts $T, \theta$ only; derives $(x,y)$ from ball physics at runtime). Three **planner modes** are selectable via CLI and the comparison harness.
-
-| Capability | Previous try (pre dual-model) | Current |
-| :--- | :--- | :--- |
-| **Planner modes** | Hybrid only (network + scoring-guard fallback) | `analytic`, `neural`, `hybrid` (`--planner-mode`) |
-| **StrikeNet variants** | Single 5-output model → `strategy_net.pth` | `legacy` (5-out) + `structured` (3-out); separate checkpoints |
-| **Structured prediction** | Proposed in docs only | Implemented: `propagate_ball_for_time` derives strike position |
-| **Evaluation** | One integration batch (hybrid/legacy default) | `compare_modes.py`: 5 configs × shared seeds |
-| **Fallback analysis** | Always attempted | Skips gracefully on analytic/neural-only batches |
-| **Benchmark** | Legacy inference only | `--model-variant both`; structured latency = infer + rollout |
-| **Pipeline** | 6 steps, single train | 7 steps: train both variants + comparison harness |
-
-**Key code:** `decide_strike_target()` in `src/main.py`; `StrikeNet(variant=...)` and `train(..., variant=...)` in `src/network.py`; paths in `src/data_layout.py`; `scripts/compare_modes.py`.
-
-**Full pipeline:** `.\run_pipeline.ps1` or `bash run_pipeline.sh` (use `-NoVideo` / `--no-video` for faster step 4).
-
-Design rationale for structured variant: [PHYSICS_INFORMED_PREDICTION.md](PHYSICS_INFORMED_PREDICTION.md).
+**Runtime architecture note:** Only one hybrid mode exists at runtime (network prediction with scoring-guard fallback). There is no selectable analytic-only or network-only mode; `target_source` in `metadata.json` logs which path drove each episode. The online fallback propagates the ball to the network's $T$ and sweeps headings inline — it does not call `analytic_strike_plan()` for control (that function is for offline labels and latency timing). Physics-informed prediction ($T+\theta$ only, derive $x,y$ from ball rollout) is **not implemented** — see [FUTURE_physics_informed_prediction.md](FUTURE_physics_informed_prediction.md).
 
 ---
 
@@ -104,6 +78,4 @@ The integration test (`scripts/test_main.py`) runs **100** seeds by default (100
 
 **Diagnostic** (not pass gates): closest-approach `contact_pos_err_m`, `net_vs_analytic_pos_m`, network-vs-fallback breakdown via `scripts/analyze_fallback.py`.
 
-*Previous try (illustrative, `{PREVIOUS_INTEGRATION_BATCH}`):* 74% success over 50 seeds (37/50); network 16/26 (61.5%), fallback 21/24 (87.5%). The earlier "88% / 44-50" figure reflected the old analytic-driven loop.
-
-*Current system:* fill from `{LATEST_INTEGRATION_BATCH}/summary.json` (step 4) and `{LATEST_COMPARISON_RUN}` → `data/reports/plots/comparison/{run}/comparison.csv` (step 7).
+*Example (50-seed batch `20260612_155705`):* 74% success (37/50); network 16/26 (61.5%), fallback 21/24 (87.5%). The earlier "88% / 44-50" figure reflected the old analytic-driven loop and is no longer representative.

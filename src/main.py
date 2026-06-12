@@ -42,11 +42,97 @@ from src.network import StrikeNet
 from src.goal import Goal
 from src.planner import analytic_strike_plan
 
+def decide_strike_target(planner_mode, model, model_variant, input7,
+                         ball_start, ball_vel, car_state, goal,
+                         dt, field_w, field_h, ball_restitution, v_impact):
+    """Pick the strike target for this episode.
+
+    Returns
+    -------
+    T_final, x_tgt, y_tgt, theta_tgt, target_source, strike_pos, strike_vel,
+    decision_path_ms, fallback_sweep_ms
+
+    ``decision_path_ms`` is the wall-clock cost of this function (the deployed
+    online decision latency).  For hybrid mode, ``fallback_sweep_ms`` is the
+    portion spent in the 36-heading scoring sweep when the network plan fails
+    the rollout check; zero otherwise.
+    """
+    t_path = time.perf_counter()
+    fallback_sweep_ms = 0.0
+
+    def goal_los(px, py):
+        return np.arctan2(goal.center[1] - py, goal.center[0] - px)
+
+    def scores(pos_xy, theta, svel):
+        v_post = compute_strike_velocity(svel, v_car=v_impact, theta_car=theta, e_strike=0.8)
+        fp, _ = propagate_ball_for_time(pos_xy, v_post, total_time=5.0, dt=dt,
+                                        field_w=field_w, field_h=field_h,
+                                        restitution=ball_restitution, goal=goal)
+        return fp[0] >= goal.x - 1e-9 and goal.y_min <= fp[1] <= goal.y_max
+
+    # ---------- ANALYTIC ----------
+    if planner_mode == "analytic":
+        plan = analytic_strike_plan(ball_start.copy(), ball_vel.copy(), car_state, goal,
+                                    field_w=field_w, field_h=field_h,
+                                    ball_dt=dt, ball_restitution=ball_restitution)
+        if plan is None:
+            T = 2.0
+            sp, sv = propagate_ball_for_time(ball_start, ball_vel, T, dt=dt,
+                                             field_w=field_w, field_h=field_h,
+                                             restitution=ball_restitution)
+            path_ms = (time.perf_counter() - t_path) * 1e3
+            return T, float(sp[0]), float(sp[1]), goal_los(sp[0], sp[1]), "analytic_infeasible", sp, sv, path_ms, 0.0
+        T, x, y, theta = plan
+        sp, sv = propagate_ball_for_time(ball_start, ball_vel, T, dt=dt,
+                                         field_w=field_w, field_h=field_h,
+                                         restitution=ball_restitution)
+        path_ms = (time.perf_counter() - t_path) * 1e3
+        return float(T), float(x), float(y), float(theta), "analytic", sp, sv, path_ms, 0.0
+
+    # ---------- NEURAL / HYBRID (model required) ----------
+    preds = model.predict(input7)
+    if model_variant == "legacy":
+        T = float(preds[0]); x_net = float(preds[1]); y_net = float(preds[2]); theta_net = float(preds[3])
+    else:
+        T = float(preds[0]); theta_net = float(preds[1])
+
+    N_steps = max(1, min(50, int(round(T / dt))))
+    T_final = N_steps * dt
+    sp, sv = propagate_ball_for_time(ball_start, ball_vel, T_final, dt=dt,
+                                     field_w=field_w, field_h=field_h,
+                                     restitution=ball_restitution)
+    if model_variant == "structured":
+        x_net, y_net = float(sp[0]), float(sp[1])     # on-trajectory by construction
+    else:
+        x_net = float(np.clip(x_net, 0.0, field_w)); y_net = float(np.clip(y_net, 0.0, field_h))
+
+    if planner_mode == "neural":
+        path_ms = (time.perf_counter() - t_path) * 1e3
+        return T_final, x_net, y_net, theta_net, "network", sp, sv, path_ms, 0.0
+
+    # hybrid
+    if scores(np.array([x_net, y_net]), theta_net, sv):
+        path_ms = (time.perf_counter() - t_path) * 1e3
+        return T_final, x_net, y_net, theta_net, "network", sp, sv, path_ms, 0.0
+
+    t_fb = time.perf_counter()
+    thetas = [t for t in np.linspace(-np.pi, np.pi, 36, endpoint=False) if scores(sp, t, sv)]
+    if thetas:
+        tg = goal_los(sp[0], sp[1])
+        theta_fb = min(thetas, key=lambda th: abs(np.arctan2(np.sin(th - tg), np.cos(th - tg))))
+    else:
+        theta_fb = goal_los(sp[0], sp[1])
+    fallback_sweep_ms = (time.perf_counter() - t_fb) * 1e3
+    path_ms = (time.perf_counter() - t_path) * 1e3
+    return T_final, float(sp[0]), float(sp[1]), float(theta_fb), "fallback", sp, sv, path_ms, fallback_sweep_ms
+
 def run_simulation(
     ball_start: np.ndarray,
     ball_vel: np.ndarray,
     car_start: np.ndarray,
     goal: Goal = None,
+    planner_mode: str = "hybrid",
+    model_variant: str = "legacy",
     model_path: str = None,
     render: bool = False,
     save_video: bool = False,
@@ -65,56 +151,32 @@ def run_simulation(
     if goal is None:
         goal = Goal()
 
-    # 1. Load the trained StrikeNet model
-    if model_path is None:
-        model_path = os.path.join(PROJECT_ROOT, "models", "strategy_net.pth")
-    
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found at {model_path}. Train the network first.")
+    # 1. Load the trained StrikeNet model if needed
+    model = None
+    if planner_mode != "analytic":
+        if model_path is None:
+            from src.data_layout import model_path_for_variant
+            model_path = str(model_path_for_variant(model_variant))
         
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = StrikeNet().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}. Train the network first.")
+            
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = StrikeNet.load(model_path, map_location=device)
+        model_variant = model.variant # Trust the file
+        model.eval()
 
-    # 2. Prepare inputs for StrikeNet
-    # Input schema: [ball_x, ball_y, ball_vx, ball_vy, car_x, car_y, car_theta]
+    # 2. Prepare inputs
     inputs = np.array([
         ball_start[0], ball_start[1], ball_vel[0], ball_vel[1],
         car_start[0], car_start[1], car_start[2]
     ], dtype=np.float32)
 
-    # 3. Query StrikeNet — with warm-up + repeated timing for latency logging.
-    # We force CPU for the timing comparison so the measurement is comparable to
-    # the analytic search (also single-threaded NumPy CPU).
+    # 3. Time measurements
     TIMING_REPEATS = 30
     TIMING_DEVICE = "cpu"
-    timing_model = StrikeNet()
-    timing_model.load_state_dict(model.state_dict())
-    timing_model = timing_model.to(TIMING_DEVICE)
-    timing_model.eval()
-    timing_inputs = inputs.copy()
 
-    # Warm-up (discarded): absorbs lazy init and JIT costs
-    for _ in range(3):
-        timing_model.predict(timing_inputs)
-
-    _infer_times = []
-    for _ in range(TIMING_REPEATS):
-        _t0 = time.perf_counter()
-        timing_model.predict(timing_inputs)
-        _infer_times.append((time.perf_counter() - _t0) * 1e3)  # ms
-    strikenet_infer_ms = float(np.median(_infer_times))
-
-    # Run the actual (potentially GPU) predict for control
-    preds = model.predict(inputs)  # Returns [T_strike, x_strike, y_strike, theta_strike]
-    T_strike = float(preds[0])
-    x_strike = float(preds[1])
-    y_strike = float(preds[2])
-    theta_strike = float(preds[3])
-
-    # Timed analytic planner on same scene — pure measurement, does NOT drive control.
-    # Warm-up
+    # Always measure analytic for reference
     _car_state_arr = np.array([car_start[0], car_start[1], car_start[2]])
     for _ in range(3):
         analytic_strike_plan(
@@ -132,91 +194,98 @@ def run_simulation(
         )
         _analytic_times.append((time.perf_counter() - _t0) * 1e3)  # ms
     analytic_strategy_ms = float(np.median(_analytic_times))
-    speedup_factor = analytic_strategy_ms / max(strikenet_infer_ms, 1e-6)
 
-    # Convert T_strike to discrete steps
-    N_steps = int(round(T_strike / dt))
-    N_steps = max(1, min(50, N_steps)) # Clip between 0.1s and 5.0s
+    strikenet_infer_ms = 0.0
+    rollout_ms = 0.0
+    if model is not None:
+        timing_model = StrikeNet(variant=model_variant)
+        timing_model.load_state_dict(model.state_dict())
+        timing_model = timing_model.to(TIMING_DEVICE)
+        timing_model.eval()
+        timing_inputs = inputs.copy()
 
-    print("=" * 65)
-    print("  STRIKENET PREDICTION")
-    print("=" * 65)
-    print(f"  Predicted T_strike    : {T_strike:.3f} s  ({N_steps} steps)")
-    print(f"  Predicted x_strike    : {x_strike:.3f} m")
-    print(f"  Predicted y_strike    : {y_strike:.3f} m")
-    print(f"  Predicted theta_strike : {theta_strike:+.3f} rad ({np.degrees(theta_strike):.1f} deg)")
-    print(f"  StrikeNet infer (CPU) : {strikenet_infer_ms:.3f} ms  (median/{TIMING_REPEATS} reps)")
-    print(f"  Analytic search       : {analytic_strategy_ms:.1f} ms  (median/{TIMING_REPEATS} reps)")
-    print(f"  Speedup factor        : {speedup_factor:.1f}x")
-    print("-" * 65)
+        for _ in range(3):
+            timing_model.predict(timing_inputs)
 
-    # Define strike state for NMPC from the network's prediction.
-    # The analytic ball rollout is kept only as a diagnostic and as a
-    # sanity-check fallback if the predicted heading cannot score.
-    T_final = N_steps * dt
-    field_w, field_h = field_size
-    strike_pos, strike_vel = propagate_ball_for_time(
-        ball_start,
-        ball_vel,
-        T_final,
-        dt=dt,
-        field_w=field_w,
-        field_h=field_h,
-        restitution=ball_restitution,
-    )
+        _infer_times = []
+        for _ in range(TIMING_REPEATS):
+            _t0 = time.perf_counter()
+            timing_model.predict(timing_inputs)
+            _infer_times.append((time.perf_counter() - _t0) * 1e3)
+        strikenet_infer_ms = float(np.median(_infer_times))
 
-    # Network-predicted strike target, clipped to the playable field
-    x_strike_net = float(np.clip(x_strike, 0.0, field_w))
-    y_strike_net = float(np.clip(y_strike, 0.0, field_h))
-    net_vs_analytic = np.hypot(x_strike_net - strike_pos[0], y_strike_net - strike_pos[1])
+        if model_variant == "structured":
+            # Time the rollout component
+            T_for_timing = 2.0
+            for _ in range(3):
+                propagate_ball_for_time(ball_start, ball_vel, T_for_timing, dt=dt, field_w=field_size[0], field_h=field_size[1], restitution=ball_restitution)
+            _rollout_times = []
+            for _ in range(TIMING_REPEATS):
+                _t0 = time.perf_counter()
+                propagate_ball_for_time(ball_start, ball_vel, T_for_timing, dt=dt, field_w=field_size[0], field_h=field_size[1], restitution=ball_restitution)
+                _rollout_times.append((time.perf_counter() - _t0) * 1e3)
+            rollout_ms = float(np.median(_rollout_times))
 
-    def _scores(pos_xy: np.ndarray, theta: float) -> bool:
-        """Does striking at pos_xy with heading theta send the ball into the goal?"""
-        v_post = compute_strike_velocity(strike_vel, v_car=v_impact, theta_car=theta, e_strike=0.8)
-        final_pos, _ = propagate_ball_for_time(
-            pos_xy,
-            v_post,
-            total_time=5.0,
-            dt=dt,
-            field_w=field_w,
-            field_h=field_h,
-            restitution=ball_restitution,
-            goal=goal,
-        )
-        return final_pos[0] >= goal.x - 1e-9 and goal.y_min <= final_pos[1] <= goal.y_max
+    infer_plus_rollout_ms = strikenet_infer_ms + rollout_ms
 
-    if _scores(np.array([x_strike_net, y_strike_net]), theta_strike):
-        # Trust the network end-to-end
-        target_source = "network"
-        x_strike_tgt = x_strike_net
-        y_strike_tgt = y_strike_net
-        theta_strike_tgt = theta_strike
+    # Deployed decision latency: wall-clock of the ACTUAL planner path used for
+    # control (inference + rollout + scoring + hybrid fallback sweep when it fires).
+    # decide_strike_target is pure/deterministic given the scene, so we warm up
+    # and take the median over TIMING_REPEATS — matching the analytic/infer
+    # micro-benchmark protocol so speedup_factor compares like with like. The
+    # final (deterministic) result drives control.
+    _decide_args = (planner_mode, model, model_variant, inputs, ball_start, ball_vel,
+                    _car_state_arr, goal, dt, field_size[0], field_size[1],
+                    ball_restitution, v_impact)
+
+    if planner_mode == "analytic":
+        # Deployed path == the analytic search we already micro-benchmarked above.
+        # Call once for the actual decision; reuse the 30-rep reference as latency
+        # (avoids re-running the expensive search 33x per seed).
+        decision = decide_strike_target(*_decide_args)
+        decision_latency_ms = float(analytic_strategy_ms)
+        fallback_sweep_ms = 0.0
     else:
-        # Fallback: analytic strike point + scoring-heading sweep
-        target_source = "fallback"
-        x_strike_tgt = float(strike_pos[0])
-        y_strike_tgt = float(strike_pos[1])
+        # Neural/hybrid path is cheap; warm up then take the median over
+        # TIMING_REPEATS so it matches the analytic/infer micro-benchmark protocol.
+        for _ in range(3):
+            decide_strike_target(*_decide_args)
+        _path_times = []
+        _sweep_times = []
+        decision = None
+        for _ in range(TIMING_REPEATS):
+            decision = decide_strike_target(*_decide_args)
+            _path_times.append(decision[7])
+            _sweep_times.append(decision[8])
+        decision_latency_ms = float(np.median(_path_times))
+        fallback_sweep_ms = float(np.median(_sweep_times))
 
-        theta_los_goal = np.arctan2(goal.center[1] - y_strike_tgt, goal.center[0] - x_strike_tgt)
-        scoring_thetas = [
-            theta_cand
-            for theta_cand in np.linspace(-np.pi, np.pi, 36, endpoint=False)
-            if _scores(strike_pos, theta_cand)
-        ]
-        if scoring_thetas:
-            # Pick the scoring heading closest to line-of-sight to the goal
-            # (same canonical choice as the dataset labels)
-            theta_strike_tgt = min(
-                scoring_thetas,
-                key=lambda th: abs(np.arctan2(np.sin(th - theta_los_goal), np.cos(th - theta_los_goal))),
-            )
-        else:
-            theta_strike_tgt = theta_los_goal
+    (T_final, x_strike_tgt, y_strike_tgt, theta_strike_tgt, target_source,
+     strike_pos, strike_vel, _last_path_ms, _last_sweep_ms) = decision
+    speedup_factor = analytic_strategy_ms / max(decision_latency_ms, 1e-6)
 
-    print(f"  Ball bounce           : restitution={ball_restitution}, field={field_w}x{field_h} m")
-    print(f"  Net vs analytic ball  : {net_vs_analytic:.3f} m apart at T_final={T_final:.2f} s")
+    N_steps = max(1, min(50, int(round(T_final / dt))))
+    
+    net_vs_analytic = 0.0
+    if target_source == "network" and model_variant == "legacy":
+        net_vs_analytic = np.hypot(x_strike_tgt - strike_pos[0], y_strike_tgt - strike_pos[1])
+
+    print("=" * 65)
+    print("  PLANNER PREDICTION")
+    print("=" * 65)
+    print(f"  Mode                  : {planner_mode} ({model_variant if planner_mode != 'analytic' else 'N/A'})")
+    print(f"  T_final               : {T_final:.3f} s  ({N_steps} steps)")
     print(f"  Target source         : {target_source}")
     print(f"  Strike target         : x={x_strike_tgt:.3f} m, y={y_strike_tgt:.3f} m, theta={theta_strike_tgt:+.3f} rad")
+    print(f"  Decision latency (ms) : {decision_latency_ms:.3f} ms  (deployed path)")
+    if fallback_sweep_ms > 0:
+        print(f"  Fallback sweep (ms)   : {fallback_sweep_ms:.3f} ms")
+    if planner_mode != "analytic":
+        print(f"  Infer micro-bench (ms): {strikenet_infer_ms:.3f} ms  (median/{TIMING_REPEATS} reps, diagnostic)")
+        if rollout_ms > 0:
+            print(f"  Rollout micro-bench   : {rollout_ms:.3f} ms  (diagnostic)")
+    print(f"  Analytic search ref   : {analytic_strategy_ms:.1f} ms  (median/{TIMING_REPEATS} reps, diagnostic)")
+    print(f"  Speedup factor        : {speedup_factor:.1f}x  (analytic ref / deployed)")
     print("-" * 65)
     
     x_target = x_strike_tgt - offset_dist * np.cos(theta_strike_tgt)
@@ -440,11 +509,20 @@ def run_simulation(
             "net_vs_analytic_pos_m": float(net_vs_analytic),
             "strike_step": strike_step,
             # --- Scalability / latency fields ---
+            # decision_latency_ms: wall-clock deployed path (includes hybrid fallback sweep).
+            # strikenet_infer_ms / rollout_ms / analytic_strategy_ms: 30-rep micro-benchmarks
+            # for head-to-head comparison; not used as the headline latency number.
             "strikenet_infer_ms": strikenet_infer_ms,
+            "rollout_ms": rollout_ms,
+            "infer_plus_rollout_ms": infer_plus_rollout_ms,
+            "decision_latency_ms": decision_latency_ms,
+            "fallback_sweep_ms": fallback_sweep_ms,
             "analytic_strategy_ms": analytic_strategy_ms,
             "speedup_factor": speedup_factor,
             "timing_device": TIMING_DEVICE,
             "timing_repeats": TIMING_REPEATS,
+            "planner_mode": planner_mode,
+            "model_variant": (None if planner_mode == "analytic" else model_variant),
         }
         if run_metadata:
             meta.update(run_metadata)
@@ -462,6 +540,8 @@ if __name__ == "__main__":
     parser.add_argument("--save-video", action="store_true", help="Save trajectory CSV + simulation.mp4")
     parser.add_argument("--run-dir", type=str, default=None, help="Output run directory (default: data/runs/manual/...)")
     parser.add_argument("--video-fps", type=float, default=10.0, help="FPS for saved simulation video")
+    parser.add_argument("--planner-mode", choices=["analytic","neural","hybrid"], default="hybrid")
+    parser.add_argument("--model-variant", choices=["legacy","structured"], default="legacy")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -498,6 +578,8 @@ if __name__ == "__main__":
         ball_start=ball_start,
         ball_vel=ball_vel,
         car_start=car_start,
+        planner_mode=args.planner_mode,
+        model_variant=args.model_variant,
         render=args.render,
         save_video=args.save_video,
         run_dir=run_dir,

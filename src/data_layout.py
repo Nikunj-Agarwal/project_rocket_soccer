@@ -32,6 +32,32 @@ PLOTS_INTEGRATION_DIR = PLOTS_DIR / "integration"
 BENCHMARKS_DIR = REPORTS_DIR / "benchmarks"
 SCALABILITY_CSV = BENCHMARKS_DIR / "scalability.csv"
 
+# --- Models (per variant) ---
+MODELS_DIR = PROJECT_ROOT / "models"
+STRIKE_NET_LEGACY = MODELS_DIR / "strategy_net_legacy.pth"
+STRIKE_NET_STRUCTURED = MODELS_DIR / "strategy_net_structured.pth"
+STRATEGY_NET_DEFAULT = MODELS_DIR / "strategy_net.pth"  # backward-compat (legacy)
+
+TRAINING_LOG_LEGACY = TRAINING_DIR / "training_log_legacy.csv"
+TRAINING_LOG_STRUCTURED = TRAINING_DIR / "training_log_structured.csv"
+
+# --- Comparison harness ---
+COMPARISON_TESTS_DIR = TESTS_DIR / "comparison"
+PLOTS_COMPARISON_DIR = PLOTS_DIR / "comparison"
+
+def model_path_for_variant(variant: str) -> Path:
+    return STRIKE_NET_LEGACY if variant == "legacy" else STRIKE_NET_STRUCTURED
+
+def training_log_for_variant(variant: str) -> Path:
+    return TRAINING_LOG_LEGACY if variant == "legacy" else TRAINING_LOG_STRUCTURED
+
+def new_comparison_run(run_id: str | None = None) -> Path:
+    bid = run_id or timestamp_id()
+    return ensure_dir(COMPARISON_TESTS_DIR / bid)
+
+def plots_comparison_dir(run_id: str) -> Path:
+    return ensure_dir(PLOTS_COMPARISON_DIR / run_id)
+
 TRAJECTORY_CSV = "trajectory.csv"
 SIMULATION_MP4 = "simulation.mp4"
 SIMULATION_GIF = "simulation.gif"
@@ -85,6 +111,21 @@ def list_integration_batches() -> list[Path]:
 def latest_integration_batch() -> Path | None:
     batches = list_integration_batches()
     return batches[0] if batches else None
+
+
+def list_comparison_runs() -> list[Path]:
+    if not COMPARISON_TESTS_DIR.is_dir():
+        return []
+    runs = [p for p in COMPARISON_TESTS_DIR.iterdir() if p.is_dir()]
+    return sorted(runs, key=lambda p: p.name, reverse=True)
+
+
+def latest_comparison_run() -> Path | None:
+    runs = list_comparison_runs()
+    return runs[0] if runs else None
+
+
+PIPELINE_SUMMARIES_DIR = REPORTS_DIR / "pipeline_summaries"
 
 
 def plots_global_dir() -> Path:
