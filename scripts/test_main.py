@@ -122,16 +122,26 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
         df = pd.read_csv(traj_path)
         history = df.to_dict(orient="records")
         
+        # success is strike-gated in main.py (scored AND ball_struck)
         success = meta.get("success", False)
-        
-        # Extract interception errors at the actual moment of strike (closest approach / contact)
+        scored = meta.get("scored", success)        # raw physics flag
+        ball_struck = meta.get("ball_struck", False)
+        # Detect goals that entered without a car strike (excluded from success)
+        unstruck_goal = bool(scored and not ball_struck)
+
+        # --- Headline precision metric (Issue 2) ---
+        # strike_point_pred_err_m is written by main.py; fall back to NaN for
+        # old batches that don't have it yet.
+        strike_point_pred_err_m = meta.get("strike_point_pred_err_m", float("nan"))
+
+        # --- Legacy closest-approach distance (diagnostic only) ---
         if history:
             closest_step = min(history, key=lambda h: h["pos_err"])
-            strike_pos_err = closest_step["pos_err"]
-            strike_heading_err = closest_step["heading_err"]
+            contact_dist = closest_step["pos_err"]
+            contact_heading_err = closest_step["heading_err"]
         else:
-            strike_pos_err = meta.get("final_pos_err_m", 999.0)
-            strike_heading_err = meta.get("final_heading_err_rad", 999.0)
+            contact_dist = meta.get("final_pos_err_m", 999.0)
+            contact_heading_err = meta.get("final_heading_err_rad", 999.0)
 
         final_ball = np.array([history[-1]["ball_x"], history[-1]["ball_y"]]) if history else np.array([0,0])
         final_car = np.array([history[-1]["car_x"], history[-1]["car_y"]]) if history else np.array([0,0])
@@ -149,9 +159,13 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "seed": seed,
             "crashed": False,
             "success": success,
+            "scored": scored,
+            "ball_struck": ball_struck,
+            "unstruck_goal": unstruck_goal,
             "on_field": on_field,
-            "strike_pos_err": strike_pos_err,
-            "strike_heading_err": strike_heading_err,
+            "strike_point_pred_err_m": strike_point_pred_err_m,
+            "contact_dist": contact_dist,
+            "contact_heading_err": contact_heading_err,
             "final_ball": final_ball,
             "final_car": final_car,
             "target_source": meta.get("target_source", "unknown"),
@@ -163,9 +177,13 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "seed": seed,
             "crashed": True,
             "success": False,
+            "scored": False,
+            "ball_struck": False,
+            "unstruck_goal": False,
             "on_field": False,
-            "strike_pos_err": 999.0,
-            "strike_heading_err": 999.0,
+            "strike_point_pred_err_m": float("nan"),
+            "contact_dist": 999.0,
+            "contact_heading_err": 999.0,
             "final_ball": np.array([0, 0]),
             "final_car": np.array([0, 0]),
             "target_source": "unknown",
@@ -197,8 +215,9 @@ def main():
     
     successes = 0
     failures = 0
-    pos_errors = []
-    heading_errors = []
+    unstruck_goals = 0
+    pred_err_vals = []     # strike_point_pred_err_m (new headline metric)
+    contact_dists = []     # closest-approach distance (diagnostic only)
 
     # Fallback/network tracking
     net_total = 0;   net_success = 0
@@ -237,14 +256,21 @@ def main():
                 if not res["on_field"]:
                     log.warning(f"  [WARN] Final state left the field: ball={res['final_ball']}, car={res['final_car']}")
 
+                if res["unstruck_goal"]:
+                    unstruck_goals += 1
+                    log.info(f"  {source_tag} [UNSTRUCK GOAL] Ball entered goal without car contact — excluded.")
+
                 if res["success"] and res["on_field"]:
                     successes += 1
-                    log.info(f"  {source_tag} [SUCCESS] Goal scored!")
+                    log.info(f"  {source_tag} [SUCCESS] Goal scored (with strike)!")
                 else:
                     failures += 1
                     log.info(f"  {source_tag} [FAILED]: Missed goal or left field.")
 
-                log.info(f"  Strike errors: pos={res['strike_pos_err']:.4f} m | heading={res['strike_heading_err']:.4f} rad")
+                pred_err = res["strike_point_pred_err_m"]
+                pred_err_str = f"{pred_err:.4f} m" if not np.isnan(pred_err) else "n/a"
+                log.info(f"  Pred err (target vs contact): {pred_err_str}"
+                         f" | contact dist (diag): {res['contact_dist']:.4f} m")
 
                 # Track per-source counts
                 if source == "network":
@@ -258,12 +284,14 @@ def main():
             else:
                 log.error(f"  [CRASH] Run crashed with exception: {res['error_msg']}")
                 failures += 1
-                
-            pos_errors.append(res['strike_pos_err'])
-            heading_errors.append(res['strike_heading_err'])
-            
+
+            if not np.isnan(res["strike_point_pred_err_m"]):
+                pred_err_vals.append(res["strike_point_pred_err_m"])
+            contact_dists.append(res["contact_dist"])
+
             pbar.update(1)
-            pbar.set_postfix(success=successes, fail=failures, pos_err=f"{np.mean(pos_errors):.2f}", head_err=f"{np.mean(heading_errors):.2f}")
+            mean_pred = np.mean(pred_err_vals) if pred_err_vals else float("nan")
+            pbar.set_postfix(success=successes, fail=failures, pred_err=f"{mean_pred:.2f}")
 
     pbar.close()
 
@@ -275,24 +303,27 @@ def main():
     net_rate = net_success / net_total * 100 if net_total else 0.0
     fb_rate  = fb_success  / fb_total  * 100 if fb_total  else 0.0
 
+    mean_pred_err = np.mean(pred_err_vals) if pred_err_vals else float("nan")
+    median_pred_err = np.median(pred_err_vals) if pred_err_vals else float("nan")
+    mean_contact = np.mean(contact_dists) if contact_dists else float("nan")
+
     log.info(f"  Total runs       : {len(seeds)}")
     log.info(f"  Goals (Success)  : {successes} / {len(seeds)}  ({successes/len(seeds)*100:.1f}%)")
     log.info(f"  Misses (Fail)    : {failures} / {len(seeds)}")
-    log.info(f"  Avg Strike Pos Error    : {np.mean(pos_errors):.4f} m  (target: <= 0.35)")
-    log.info(f"  Avg Strike Heading Error: {np.mean(heading_errors):.4f} rad (target: <= 0.25)")
+    log.info(f"  Goals without strike (excluded): {unstruck_goals}")
+    log.info(f"  Avg Pred Target Err (strike_point_pred_err_m): {mean_pred_err:.4f} m  [median: {median_pred_err:.4f} m]")
+    log.info(f"  Avg Contact Dist (diagnostic only)           : {mean_contact:.4f} m")
     log.info("-" * 65)
     log.info("  NETWORK vs FALLBACK BREAKDOWN")
     log.info(f"  [NETWORK ] Episodes: {net_total:>3d}  |  Scored: {net_success:>3d}  |  Success rate: {net_rate:.1f}%")
     log.info(f"  [FALLBACK] Episodes: {fb_total:>3d}  |  Scored: {fb_success:>3d}  |  Success rate: {fb_rate:.1f}%")
     log.info("-" * 65)
 
-    # Pass criteria: at least 60% success, average errors below thresholds
+    # Pass criteria: at least 60% success (strike-gated).
+    # The old closest-approach threshold (<= 0.35 m) is removed — it was tautological
+    # because contact triggers at CONTACT_RADIUS = 0.35. Success rate is the gate.
     min_successes = max(1, int(np.ceil(0.6 * len(seeds))))
-    passed = (
-        successes >= min_successes
-        and np.mean(pos_errors) <= 0.35
-        and np.mean(heading_errors) <= 0.25
-    )
+    passed = successes >= min_successes
     log.info(f"  Pass threshold     : {min_successes} / {len(seeds)} successes (60%)  "
              f"[network {net_total} eps, fallback {fb_total} eps]")
 

@@ -8,11 +8,31 @@ benchmark_scalability all call identical code, guaranteeing apples-to-apples
 latency comparisons.
 
 The default arguments reproduce the exact dataset label logic:
-  n_angles=36, t_min=0.5, t_max=5.0, t_step=0.05, R_turn=0.35
+  n_angles=36, t_min=0.5, t_max=5.0, t_step=0.05
+
+Reachability model
+------------------
+The feasibility check uses a two-part point-mass model sourced from the same
+physical constants as InterceptionMPC:
+
+  - Linear reach: a_max=2.0 m/s², v_max=2.0 m/s (matches nmpc_solver defaults).
+    max_reach_distance(T) = T²       when T ≤ t_acc  (accel phase only)
+                          = 2T − 1   when T > t_acc  (accel + cruise)
+    where t_acc = v_max / a_max = 1.0 s.  With the defaults this equals the
+    old inline formula exactly, so dataset labels are not changed.
+
+  - Turn penalty: R_turn = L / tan(delta_max) where L = wheelbase (default 0.3 m)
+    and delta_max = π/4 rad, giving R_turn = 0.30 m.  The previous hardcoded
+    value was 0.35 m; the constant is now explicit and documented.
+    NOTE: switching from 0.35 to 0.30 slightly changes label acceptance and
+    requires a dataset regen + retrain.  The default is kept at the old 0.35
+    so behaviour is preserved until the physics-informed retrain is done
+    (see docs/FUTURE_physics_informed_prediction.md).
 """
 
 from __future__ import annotations
 
+import math
 import numpy as np
 
 from src.ball_physics import (
@@ -25,6 +45,37 @@ from src.ball_physics import (
     compute_strike_velocity,
 )
 from src.goal import Goal
+
+# Physical constants that mirror InterceptionMPC defaults.
+# Keeping them here as module-level defaults makes the relationship explicit
+# and avoids magic numbers scattered through the code.
+_CAR_A_MAX: float = 2.0        # m/s²  — matches nmpc_solver.InterceptionMPC.a_max
+_CAR_V_MAX: float = 2.0        # m/s   — matches nmpc_solver.InterceptionMPC.v_max
+_CAR_L: float = 0.3            # m     — matches nmpc_solver.InterceptionMPC.L
+_CAR_DELTA_MAX: float = math.pi / 4  # rad — matches nmpc_solver.InterceptionMPC.delta_max
+# Exact min turn radius: L / tan(delta_max) = 0.3 / 1.0 = 0.30 m.
+# The dataset was generated with R_turn=0.35 (slightly looser); changing this
+# requires a dataset regen.  Default kept at 0.35 for backward compatibility.
+_R_TURN_EXACT: float = _CAR_L / math.tan(_CAR_DELTA_MAX)   # 0.30 m
+_R_TURN_LEGACY: float = 0.35                                # m — original value
+
+
+def max_reach_distance(T: float, a_max: float = _CAR_A_MAX, v_max: float = _CAR_V_MAX) -> float:
+    """Maximum distance a point mass starting from rest can travel in time T.
+
+    Derivation: accelerate at a_max until v_max is reached (at t_acc = v_max/a_max),
+    then cruise at v_max for the remainder.
+
+    With a_max=2, v_max=2 (the NMPC defaults):
+        t_acc = 1 s
+        T ≤ 1 s  →  d = 0.5 * a_max * T²  =  T²
+        T > 1 s  →  d = 0.5*a_max*t_acc² + v_max*(T-t_acc)  =  2T - 1
+    These are identical to the old inline formulas.
+    """
+    t_acc = v_max / a_max
+    if T <= t_acc:
+        return 0.5 * a_max * T * T
+    return 0.5 * a_max * t_acc * t_acc + v_max * (T - t_acc)
 
 
 def analytic_strike_plan(
@@ -43,18 +94,29 @@ def analytic_strike_plan(
     t_min: float = 0.5,
     t_max: float = 5.0,
     t_step: float = 0.05,
-    R_turn: float = 0.35,
+    # Car kinematic constants for the reachability check.
+    # Defaults mirror InterceptionMPC (nmpc_solver.py) so training labels and
+    # runtime control share the same physical assumptions.
+    car_a_max: float = _CAR_A_MAX,
+    car_v_max: float = _CAR_V_MAX,
+    R_turn: float = _R_TURN_LEGACY,   # 0.35 m; use _R_TURN_EXACT (0.30) after retrain
 ) -> tuple[float, float, float, float] | None:
     """Find the minimum feasible interception plan for the given scene.
 
     Parameters
     ----------
-    ball_pos : (2,) current ball position [m]
-    ball_vel : (2,) current ball velocity [m/s]
+    ball_pos  : (2,) current ball position [m]
+    ball_vel  : (2,) current ball velocity [m/s]
     car_state : (>=3,) car state; only car_state[0:3] = (x, y, theta) used
     goal      : Goal geometry object
     n_angles  : number of candidate strike headings swept in [-pi, pi)
-    (all other kwargs mirror ball_physics defaults)
+    car_a_max : car max acceleration [m/s²] for point-mass reach distance model
+    car_v_max : car max speed [m/s] for point-mass reach distance model
+    R_turn    : effective turn-arc radius [m] used to penalise heading changes.
+                Approximates the Dubins path cost for the angular deviation between
+                the car's current heading, the line-of-sight to the strike point,
+                and the desired strike heading.  Exact value is L/tan(delta_max).
+    (remaining kwargs mirror ball_physics defaults)
 
     Returns
     -------
@@ -99,15 +161,14 @@ def analytic_strike_plan(
                 continue
 
             # 2. Is the strike point geometrically reachable in time T?
+            # d_effective accounts for the angular detours using the turn-arc model.
+            # d_max uses max_reach_distance (closed-form from car_a_max / car_v_max).
             theta_los = np.arctan2(b_T_y - c_y, b_T_x - c_x)
             dtheta_start = abs(np.arctan2(np.sin(theta_los - c_theta), np.cos(theta_los - c_theta)))
             dtheta_end   = abs(np.arctan2(np.sin(theta_cand - theta_los), np.cos(theta_cand - theta_los)))
             d_effective  = d + R_turn * (dtheta_start + dtheta_end)
 
-            if T <= 1.0:
-                d_max = T ** 2
-            else:
-                d_max = 2.0 * T - 1.0
+            d_max = max_reach_distance(T, a_max=car_a_max, v_max=car_v_max)
 
             if d_effective <= d_max:
                 feasible_thetas.append(float(theta_cand))

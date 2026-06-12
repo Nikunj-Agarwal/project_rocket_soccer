@@ -49,15 +49,44 @@ def load_batch_data(batch_dir: Path):
             meta = json.load(f)
 
         df = pd.read_csv(traj_path)
-        
-        # Extract strike errors at closest approach (moment of interception)
+
+        # --- Strike-gated success (Issue 1 fix) ---
+        # Recompute from the raw flags so existing batches are re-scored correctly
+        # even if their metadata.json still has the old un-gated success value.
+        scored = bool(meta.get("scored", meta.get("success", False)))
+        ball_struck = bool(meta.get("ball_struck", False))
+        success = scored and ball_struck
+        unstruck_goal = scored and not ball_struck
+
+        # --- Headline metric: predicted target vs actual ball-at-contact (Issue 2) ---
+        # Prefer the value logged by main.py (available in new batches).
+        # For old batches: backfill by computing ||strike_target - ball_at_strike||
+        # where ball_at_strike is the ball position at the trajectory step closest
+        # to the predicted strike step (N_steps).
+        strike_point_pred_err_m = meta.get("strike_point_pred_err_m", None)
+        if strike_point_pred_err_m is None and not df.empty:
+            # Backfill path: find the approach row at step ~N_steps
+            strike_target = meta.get("strike_target", None)
+            n_steps = meta.get("N_steps", None)
+            approach_df = df[df["phase"] == "approach"] if "phase" in df.columns else df
+            if strike_target is not None and n_steps is not None and not approach_df.empty:
+                # Use the last approach step (step closest to predicted horizon)
+                row = approach_df.iloc[-1]
+                err = np.hypot(strike_target[0] - row["ball_x"],
+                               strike_target[1] - row["ball_y"])
+                strike_point_pred_err_m = float(err)
+        # Sentinel NaN if still unavailable
+        if strike_point_pred_err_m is None:
+            strike_point_pred_err_m = float("nan")
+
+        # --- Legacy contact-distance (diagnostic, not a pass criterion) ---
         if not df.empty and "pos_err" in df.columns:
             closest_idx = df["pos_err"].idxmin()
-            strike_pos_err = df.loc[closest_idx, "pos_err"]
-            strike_heading_err = df.loc[closest_idx, "heading_err"]
+            contact_dist = float(df.loc[closest_idx, "pos_err"])
+            contact_heading_err = float(df.loc[closest_idx, "heading_err"])
         else:
-            strike_pos_err = meta.get("final_pos_err_m", 999.0)
-            strike_heading_err = meta.get("final_heading_err_rad", 999.0)
+            contact_dist = meta.get("final_pos_err_m", 999.0)
+            contact_heading_err = meta.get("final_heading_err_rad", 999.0)
 
         # Extract initial conditions and control effort
         if not df.empty:
@@ -94,13 +123,19 @@ def load_batch_data(batch_dir: Path):
         # Add run data
         runs_data.append({
             "seed": seed,
-            "success": meta.get("success", False),
-            "final_pos_err": strike_pos_err,
-            "final_heading_err": strike_heading_err,
+            # strike-gated success (Issue 1 fix)
+            "success": success,
+            "scored": scored,
+            "ball_struck": ball_struck,
+            "unstruck_goal": unstruck_goal,
+            # headline precision metric (Issue 2)
+            "strike_point_pred_err_m": strike_point_pred_err_m,
+            # legacy diagnostic (kept for correlation analysis and backward compat)
+            "final_pos_err": contact_dist,
+            "final_heading_err": contact_heading_err,
             "solver_failures": meta.get("solver_failures", 0),
             "N_steps": meta.get("N_steps", 0),
             "T_final": meta.get("T_final_s", 0.0),
-            "ball_struck": meta.get("ball_struck", False),
             "init_dist": init_dist,
             "init_ball_speed": init_ball_speed,
             "rms_acc": rms_acc,
@@ -592,8 +627,11 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
     print(f"  Saved raw research dataset to: {csv_path}")
 
     # 2. Compute descriptive statistics
+    # strike_point_pred_err_m: headline accuracy metric (predicted target vs ball-at-contact)
+    # final_pos_err: legacy closest-approach distance, kept as diagnostic
     metrics = {
-        "Strike Position Error (m)": df_runs["final_pos_err"],
+        "Strike Pred Target Error (m)": df_runs["strike_point_pred_err_m"].dropna(),
+        "Contact Distance [diag] (m)": df_runs["final_pos_err"],
         "Strike Heading Error (rad)": df_runs["final_heading_err"],
         "Time-to-Intercept (s)": df_runs["T_final"],
         "Control Steps": df_runs["N_steps"],
@@ -647,7 +685,11 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
         corr_md += "| " + " | ".join(row_cells) + " |\n"
 
     success_rate = (df_runs["success"].sum() / len(df_runs)) * 100
-    
+    unstruck_goals = int(df_runs["unstruck_goal"].sum()) if "unstruck_goal" in df_runs.columns else 0
+    n_seeds = len(df_runs)
+    import datetime
+    eval_date = datetime.date.today().isoformat()
+
     # Generate LaTeX code
     latex_stats_rows = []
     for row in stats_data:
@@ -674,14 +716,15 @@ def generate_research_reports(df_runs, output_dir: Path, batch_id: str):
     report_content = f"""# Publication-Grade Research Summary Report
 **Motion Planning & Control Lab — Phase 5 striker NMPC System**
 **Batch Reference ID:** `{batch_id}`
-**Evaluation Date:** 2026-05-30
-**Sample Size ($N$):** {len(df_runs)} Runs
+**Evaluation Date:** {eval_date}
+**Sample Size ($N$):** {n_seeds} Runs
 
 ---
 
 ## 1. Executive Summary & Core Results
-The NMPC striker agent was evaluated across **{len(df_runs)} distinct random seeds** (seeds 100 to 149) consisting of dynamic initial conditions, high-velocity target ball states, and complex wall-rebounding trajectories.
-* **Goal scoring success rate (Accuracy):** **{success_rate:.1f}%**
+The NMPC striker agent was evaluated across **{n_seeds} distinct random seeds** consisting of dynamic initial conditions, high-velocity target ball states, and complex wall-rebounding trajectories.
+* **Goal scoring success rate (Accuracy):** **{success_rate:.1f}%** (strike-gated: only goals following a car–ball contact are counted)
+* **Goals without car contact (excluded from success):** {unstruck_goals}
 * **Dynamic Convergence:** The combination of NMPC with a **Pursuit-Based Warm-Start** resulted in 100% solver convergence across all challenging initial heading orientations.
 * **Actuator Integrity:** Acceleration and steering inputs successfully respect boundary constraints ($|a| \\le 2.0\\text{{ m/s }}^2$ and $|\\delta| \\le \\pi/4\\text{{ rad }}$) without high-frequency chattering or instability.
 

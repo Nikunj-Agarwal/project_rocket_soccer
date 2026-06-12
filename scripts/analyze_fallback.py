@@ -54,23 +54,37 @@ def load_fallback_data(batch_dir: Path) -> pd.DataFrame:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Strike-time errors = closest approach (matches analyze_results.py)
-        strike_pos_err = meta.get("final_pos_err_m", np.nan)
-        strike_heading_err = meta.get("final_heading_err_rad", np.nan)
+        # --- Strike-gated success (Issue 1 fix) ---
+        scored = bool(meta.get("scored", meta.get("success", False)))
+        ball_struck = bool(meta.get("ball_struck", False))
+        success = scored and ball_struck
+
+        # --- Headline metric: predicted target error (Issue 2) ---
+        # Prefer logged value; fall back to contact-distance for old batches.
+        strike_point_pred_err_m = meta.get("strike_point_pred_err_m", None)
+        if strike_point_pred_err_m is None:
+            strike_point_pred_err_m = meta.get("final_pos_err_m", np.nan)
+
+        # --- Legacy contact distance (diagnostic, not a pass criterion) ---
+        contact_dist = meta.get("final_pos_err_m", np.nan)
+        contact_heading_err = meta.get("final_heading_err_rad", np.nan)
         if traj_path.is_file():
             df = pd.read_csv(traj_path)
             if not df.empty and "pos_err" in df.columns:
                 ci = df["pos_err"].idxmin()
-                strike_pos_err = float(df.loc[ci, "pos_err"])
+                contact_dist = float(df.loc[ci, "pos_err"])
                 if "heading_err" in df.columns:
-                    strike_heading_err = float(df.loc[ci, "heading_err"])
+                    contact_heading_err = float(df.loc[ci, "heading_err"])
 
         rows.append({
             "seed": int(seed_str),
             "target_source": meta.get("target_source", "unknown"),
-            "success": bool(meta.get("success", False)),
-            "strike_pos_err": strike_pos_err,
-            "strike_heading_err": strike_heading_err,
+            "success": success,
+            "scored": scored,
+            "ball_struck": ball_struck,
+            "strike_point_pred_err_m": strike_point_pred_err_m,
+            "strike_pos_err": contact_dist,          # kept for backward-compat plots
+            "strike_heading_err": contact_heading_err,
             "net_vs_analytic_pos_m": meta.get("net_vs_analytic_pos_m", np.nan),
             "strikenet_infer_ms": meta.get("strikenet_infer_ms", np.nan),
             "analytic_strategy_ms": meta.get("analytic_strategy_ms", np.nan),
@@ -90,13 +104,15 @@ def _source_stats(df: pd.DataFrame) -> dict:
     for src in ("network", "fallback"):
         sub = df[df["target_source"] == src]
         n = len(sub)
+        # Use the new headline metric where available; fall back to contact dist
+        pred_col = "strike_point_pred_err_m" if "strike_point_pred_err_m" in sub.columns else "strike_pos_err"
         out[src] = {
             "n": n,
             "share": n / len(df) if len(df) else 0.0,
             "scored": int(sub["success"].sum()),
             "success_rate": (sub["success"].mean() if n else 0.0),
-            "mean_pos_err": (sub["strike_pos_err"].mean() if n else np.nan),
-            "mean_heading_err": (sub["strike_heading_err"].mean() if n else np.nan),
+            "mean_pos_err": (sub[pred_col].mean() if n else np.nan),
+            "mean_heading_err": (sub["strike_pos_err"].mean() if n else np.nan),  # contact dist
         }
     return out
 
@@ -179,17 +195,29 @@ def write_summary(df: pd.DataFrame, stats: dict, output_dir: Path, batch_id: str
 
     n = len(df)
     overall = df["success"].mean() * 100
+    unstruck = int(df.get("ball_struck", df["success"] * 0).eq(False).sum()) if "ball_struck" in df.columns else 0
+    unstruck = int((df["scored"] & ~df["ball_struck"]).sum()) if "scored" in df.columns and "ball_struck" in df.columns else 0
     net, fb = stats["network"], stats["fallback"]
+
+    import datetime
+    eval_date = datetime.date.today().isoformat()
 
     md = f"""# Network vs. Fallback Analysis — Batch `{batch_id}`
 
+**Evaluation date:** {eval_date}
 **Sample size:** {n} runs
-**Overall success rate:** {overall:.1f}%
+**Overall success rate:** {overall:.1f}% (strike-gated: goals without car contact excluded)
+**Goals without car contact (excluded):** {unstruck}
 
 ## Source breakdown
 
-| Source | Episodes | Share | Scored | Success rate | Mean pos err (m) | Mean heading err (rad) |
-|--------|---------:|------:|-------:|-------------:|-----------------:|-----------------------:|
+Success is strike-gated: a run is a success only if the car struck the ball AND the
+ball entered the goal. `Mean pred err` is `strike_point_pred_err_m` (predicted target
+vs ball position at contact); `Mean contact dist` is the legacy closest-approach
+diagnostic (always < CONTACT_RADIUS = 0.35 m when a strike occurred).
+
+| Source | Episodes | Share | Scored | Success rate | Mean pred err (m) | Mean contact dist (m) |
+|--------|---------:|------:|-------:|-------------:|------------------:|----------------------:|
 | Network (StrikeNet trusted) | {net['n']} | {net['share']*100:.0f}% | {net['scored']} | {net['success_rate']*100:.1f}% | {net['mean_pos_err']:.3f} | {net['mean_heading_err']:.3f} |
 | Fallback (analytic) | {fb['n']} | {fb['share']*100:.0f}% | {fb['scored']} | {fb['success_rate']*100:.1f}% | {fb['mean_pos_err']:.3f} | {fb['mean_heading_err']:.3f} |
 

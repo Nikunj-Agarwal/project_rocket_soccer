@@ -253,6 +253,7 @@ def run_simulation(
     solver_failures = 0
     total_solve_ms = 0.0
     strike_step = None
+    ball_at_strike = None  # ball position at the exact moment of contact
 
     print("Running shrinking-horizon NMPC simulation...")
     for step in range(N_steps):
@@ -307,6 +308,7 @@ def run_simulation(
 
         if world.ball_struck:
             strike_step = step
+            ball_at_strike = world.ball_pos.copy()
             print(f"Collision/Strike detected at step {step}!")
             break
 
@@ -371,12 +373,31 @@ def run_simulation(
     print(f"  Solver failures      : {solver_failures}")
     print(f"  Avg solve time       : {total_solve_ms / max(1, step+1):.1f} ms")
     
-    success = world.scored
+    # A goal only counts when the car actually struck the ball.
+    # world.scored is kept as the raw physics flag; success is the research metric.
+    success = bool(world.scored and world.ball_struck)
     if success:
-        print("  [SUCCESS] GOAL scored!")
+        print("  [SUCCESS] GOAL scored (with strike)!")
+    elif world.scored and not world.ball_struck:
+        print("  [UNSTRUCK GOAL] Ball entered goal without car contact — not counted.")
     else:
         print("  [FAILED] MISSED GOAL")
     print("-" * 65)
+
+    # Issue 2: interception prediction accuracy metrics
+    # strike_point_pred_err_m: distance between the predicted strike target and
+    # where the ball actually was when contact occurred.
+    # strike_time_err_s: how many seconds early/late the strike happened vs the
+    # predicted horizon N_steps.
+    if ball_at_strike is not None and strike_step is not None:
+        strike_point_pred_err_m = float(np.linalg.norm(
+            np.array([x_strike_tgt, y_strike_tgt]) - ball_at_strike
+        ))
+        strike_time_err_s = float(abs(strike_step - N_steps) * dt)
+    else:
+        # No contact occurred; use large sentinel so summaries show the failure clearly
+        strike_point_pred_err_m = float("nan")
+        strike_time_err_s = float("nan")
 
     if run_path is not None:
         import pandas as pd
@@ -391,9 +412,24 @@ def run_simulation(
                 print(f"Simulation video saved to {video_path}")
 
         meta = {
+            # success = scored AND ball was struck (ungated goal no longer counts)
             "success": success,
+            "scored": bool(world.scored),
+            "ball_struck": bool(world.ball_struck),
+            # --- Interception prediction accuracy (Issue 2 metrics) ---
+            # strike_point_pred_err_m: ||predicted_target - ball_at_contact||
+            # Near-0 for the analytic fallback; nonzero for the network path.
+            "strike_point_pred_err_m": strike_point_pred_err_m,
+            # strike_time_err_s: |actual_strike_step - predicted_N_steps| * dt
+            "strike_time_err_s": strike_time_err_s,
+            # ball position at the actual moment of contact (null if no contact)
+            "ball_at_strike": ball_at_strike.tolist() if ball_at_strike is not None else None,
+            # --- Legacy closest-approach errors (kept as diagnostic only) ---
+            # "final_pos_err_m" alias retained so old analysis scripts don't break.
+            "contact_pos_err_m": float(final_pos_err),
             "final_pos_err_m": float(final_pos_err),
             "final_heading_err_rad": float(final_heading_err),
+            # --- Run parameters ---
             "solver_failures": solver_failures,
             "N_steps": N_steps,
             "T_final_s": float(T_final),
@@ -402,8 +438,6 @@ def run_simulation(
             "strike_target": [x_strike_tgt, y_strike_tgt, theta_strike_tgt],
             "target_source": target_source,
             "net_vs_analytic_pos_m": float(net_vs_analytic),
-            "scored": bool(world.scored),
-            "ball_struck": bool(world.ball_struck),
             "strike_step": strike_step,
             # --- Scalability / latency fields ---
             "strikenet_infer_ms": strikenet_infer_ms,
