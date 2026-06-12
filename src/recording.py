@@ -49,17 +49,21 @@ class SimulationRecorder:
 
         try:
             import imageio.v3 as iio
-            iio.imwrite(mp4_path, self._frames, fps=fps, codec="libx264", pixelformat="yuv420p")
-            return mp4_path
-        except Exception as exc:
-            print(f"[recording] MP4 save failed ({exc}); trying GIF...")
-
-        try:
-            import imageio.v3 as iio
-            iio.imwrite(gif_path, self._frames, fps=fps, loop=0)
-            return gif_path
         except Exception:
-            pass
+            iio = None
+
+        if iio is not None:
+            try:
+                iio.imwrite(mp4_path, self._frames, fps=fps, codec="libx264", pixelformat="yuv420p")
+                return mp4_path
+            except Exception as exc:
+                print(f"[recording] MP4 save failed ({exc}); trying GIF...")
+
+            try:
+                iio.imwrite(gif_path, self._frames, fps=fps, loop=0)
+                return gif_path
+            except Exception:
+                pass
 
         try:
             from PIL import Image

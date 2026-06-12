@@ -1,71 +1,77 @@
-# System overview
+# System Overview — Phase 5 Soccer Striker
 
 ## Problem
+A **robot soccer striker** must intercept a **moving, bouncing ball** on a rectangular field and redirect it into the **goal mouth** on the right wall ($x=10.0, y \in [2.0, 4.0]$). The striker must plan a path that satisfies kinodynamic constraints, intercepts the ball at the correct angle to score, and brakes to a complete stop on-pitch post-strike.
 
-A **robot soccer striker** must intercept a **moving ball** on a rectangular field and arrive at the ball with a heading aimed toward the **goal**, so a subsequent kick can score. The ball may **bounce off walls**; the car must plan under kinodynamic constraints.
+---
 
 ## Architecture
 
+The system consists of two major components:
+1. **Offline Pipeline (Imitation Learning)**: Collects reachability and scoring data, trains a multi-layer perceptron (StrikeNet) to predict *when, where, and at what heading* to meet the ball.
+2. **Online Simulation Loop**: Queries StrikeNet for the full strike plan $(T, x, y, \theta)$, **uses that plan directly** to build the NMPC target (validated by a scoring rollout, with an analytic fallback only when the predicted plan cannot score), applies a backward target offset, and runs a shrinking-horizon NMPC loop.
+
 ```mermaid
 flowchart LR
-  subgraph offline [Offline]
-    DG[data_generator]
-    SN[StrikeNet train]
-    DG --> DS[(strike_dataset.npy)]
-    DS --> SN
+  subgraph offline [Offline Pipeline]
+    DG[data_generator] --> DS[(strike_dataset.npy)]
+    DS --> SN[StrikeNet train, z-scored I/O]
     SN --> M[(strategy_net.pth)]
   end
 
-  subgraph online [Online loop]
-    M --> Pred[StrikeNet predict]
-    Pred --> Bounce[propagate_ball_for_time]
-    Bounce --> Target[NMPC terminal state]
-    Target --> MPC[InterceptionMPC]
+  subgraph online [Online Simulation Loop]
+    M --> Pred[StrikeNet predict T,x,y,theta]
+    Pred --> Check{Predicted plan scores?}
+    Check -- Yes --> Offset[Apply 0.32m Offset]
+    Check -- No --> FB[Analytic pos + heading sweep]
+    FB --> Offset
+    Offset --> MPC[InterceptionMPC]
     MPC --> World[World.step]
-    World --> MPC
+    World --> Collision{Collision?}
+    Collision -- No --> MPC
+    Collision -- "Yes (Phase 2)" --> Brake[Active Braking & Ball Flight]
+    Brake --> GoalCheck{Scored?}
   end
 ```
 
+### Module Responsibilities
+
 | Layer | Module | Role |
-|-------|--------|------|
-| Strategy | `src/network.py` — **StrikeNet** | Maps 7-D scene state → `[T_strike, x, y, θ]` (when/where to meet the ball) |
-| Planning | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon NMPC; bicycle dynamics; terminal cost to strike pose |
-| Simulation | `src/simulator.py` — **World** | Steps car (RK4 via MPC) and ball (shared bounce model) |
-| Shared physics | `src/ball_physics.py` | Inelastic axis-aligned wall bounces — **same code** in generator, `main.py`, and `World` |
-| Orchestration | `src/main.py` | Loads model, computes bounce-correct strike target, runs horizon loop |
-| Layout | `src/data_layout.py` | Canonical paths for dataset, tests, runs, reports |
+| :--- | :--- | :--- |
+| **Strategy** | `src/network.py` — **StrikeNet** | MLP that maps 7-D scene state $\rightarrow$ `[T_strike, x_strike, y_strike, sin(θ), cos(θ)]`. |
+| **Planning** | `src/nmpc_solver.py` — **InterceptionMPC** | Shrinking-horizon MPC using CasADi/IPOPT with pursuit-based warm-start to solve kinematic bicycle inputs. |
+| **Simulation** | `src/simulator.py` — **World** | Updates car (RK4 integration) and ball (wall bounce and bumper collision). |
+| **Physics** | `src/ball_physics.py` | Implements shared wall-bounce physics and car-ball elastic collision dynamics. |
+| **Goal** | `src/goal.py` | Models the goal mouth geometry and checks crossing segments for scores. |
+| **Orchestration** | `src/main.py` | Integrates components: queries StrikeNet, builds the strike target from the prediction (with scoring-validated analytic fallback), runs NMPC and post-strike phases. |
+| **Layout** | `src/data_layout.py` | Canonical paths for training logs, dataset, batches, and plots. |
 
-## State vectors
+---
 
-**StrikeNet input (7):** `[ball_x, ball_y, ball_vx, ball_vy, car_x, car_y, car_theta]`
+## State Vectors & Constants
 
-**StrikeNet output (4):** `[T_strike, x_strike, y_strike, theta_strike]`  
-Training labels use the **minimum feasible** interception time from geometric reachability (see [PIPELINE_LOGIC.md](PIPELINE_LOGIC.md)). At runtime, `x/y` from the network are used only to set horizon length; the **NMPC target position** is the ball position after bounce integration for `T_final`, not the raw network `(x, y)`.
+### 1. StrikeNet Input (7-D)
+$$\mathbf{x}_{in} = [x_{ball}, y_{ball}, v_{x,ball}, v_{y,ball}, x_{car}, y_{car}, \theta_{car}]$$
 
-**Car state (4):** `[x, y, θ, v]` — kinematic bicycle, wheelbase `L = 0.3` m.
+### 2. StrikeNet Output (5-D)
+$$\mathbf{y}_{out} = [T_{strike}, x_{strike}, y_{strike}, \sin(\theta_{strike}), \cos(\theta_{strike})]$$
+*Inputs and outputs are both z-scored (statistics stored as registered buffers). `predict()` de-normalizes the output to physical units, then reconstructs $\theta_{strike}$ via `arctan2`.*
 
-**Ball state:** position `(x, y)` and constant velocity between bounces (no spin, no friction).
+### 3. Car State (4-D Kinematic Bicycle)
+$$\mathbf{q}_{car} = [x, y, \theta, v]^T$$
+* Wheelbase $L = 0.3$ m.
+* Bounds: $v \in [0.0, 2.0]$ m/s, $a \in [-2.0, 2.0]$ m/s², $\delta \in [-\pi/4, \pi/4]$ rad.
 
-**Goal:** fixed at `(9.5, 3.0)` m unless overridden in tests.
+### 4. Ball State
+Position $(x, y)$ and velocity $(v_x, v_y)$. Wall restitution is $e=0.85$. Car bumper restitution is $e_{strike}=0.8$.
 
-## Phases (project history)
+### 5. Goal mouth
+Segment along $x = 10.0$ for $y \in [2.0, 4.0]$. Center is $(10.0, 3.0)$.
 
-| Phase | Deliverable |
-|-------|-------------|
-| 1 | `World` + bicycle dynamics + field renderer |
-| 2 | `data_generator` + `strike_dataset.npy` |
-| 3 | StrikeNet + `main.py` NMPC loop + integration tests |
-| 3.6 | Shared **inelastic wall bounce** (restitution 0.85); on-field labels; bounce-consistent MPC target |
-| 4 | `scripts/generate_plots.py` + structured `data/reports/plots/` |
+---
 
-## Entry points
-
-| Command | Purpose |
-|---------|---------|
-| `python -m src.data_generator` | Build training set |
-| `python -m src.network` | Train / save `models/strategy_net.pth` |
-| `python src/main.py --seed N --save-video` | Single demo → `data/runs/manual/...` |
-| `python scripts/test_main.py` | 10-seed integration batch → `data/tests/integration/{batch}/` |
-| `python scripts/generate_plots.py` | Figures from training log + chosen integration batch |
-
-See [DATA_AND_REPORTS.md](DATA_AND_REPORTS.md) for how batch IDs link raw runs to plots.
+## System Phases
+* **Phase 1-3**: Interception of static/moving ball (point contact).
+* **Phase 3.6**: Wall-bounce awareness (shared bounce integrator, reachability dataset filter).
+* **Phase 4**: Batch-organized reporting structure (`scripts/generate_plots.py`).
+* **Phase 5**: **Strike & Score** (elastic bumper collisions, goal line scoring checks, active braking, NMPC target offsets).

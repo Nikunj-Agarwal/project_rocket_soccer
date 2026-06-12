@@ -37,8 +37,8 @@ class InterceptionMPC:
         v_min/max  : speed bounds
         delta_max  : max steering angle (symmetric)
         a_max      : max acceleration (symmetric)
-        Q_terminal : 4×4 terminal cost weight  (default: diag([10,10,5,1]))
-        R          : 2×2 running cost weight    (default: diag([0.1, 0.1]))
+        Q_terminal : 4×4 terminal cost weight  (default: diag([3000, 3000, 300, 1]))
+        R          : 2×2 running cost weight    (default: diag([0.005, 0.005]))
         """
         self.dt = dt
         self.L = L
@@ -48,12 +48,22 @@ class InterceptionMPC:
         self.a_max = a_max
 
         if Q_terminal is None:
-            Q_terminal = np.diag([10.0, 10.0, 5.0, 1.0])
+            Q_terminal = np.diag([3000.0, 3000.0, 300.0, 1.0])
         if R is None:
-            R = np.diag([0.1, 0.1])
+            R = np.diag([0.005, 0.005])
 
         self.Q_terminal = Q_terminal
         self.R = R
+
+        # Solver options (built once, reused every solve call)
+        self._p_opts = {"expand": True, "print_time": False, "verbose": False}
+        self._s_opts = {
+            "print_level": 0,
+            "max_iter": 300,
+            "tol": 1e-4,
+            "acceptable_tol": 1e-3,
+            "sb": "yes",  # suppress IPOPT banner
+        }
 
         # Build the symbolic RK4 integrator once
         self._build_integrator()
@@ -133,15 +143,13 @@ class InterceptionMPC:
             opti.subject_to(X[:, k + 1] == x_next)
 
         # ---- Bound constraints ----
-        for k in range(N_steps):
-            # Speed bounds
+        for k in range(N_steps + 1):
+            # Speed bounds (all N+1 states)
             opti.subject_to(opti.bounded(self.v_min, X[3, k], self.v_max))
-            # Acceleration bounds
-            opti.subject_to(opti.bounded(-self.a_max, U[0, k], self.a_max))
-            # Steering bounds
-            opti.subject_to(opti.bounded(-self.delta_max, U[1, k], self.delta_max))
-        # Terminal speed bound
-        opti.subject_to(opti.bounded(self.v_min, X[3, N_steps], self.v_max))
+            if k < N_steps:
+                # Acceleration and steering bounds (N controls)
+                opti.subject_to(opti.bounded(-self.a_max, U[0, k], self.a_max))
+                opti.subject_to(opti.bounded(-self.delta_max, U[1, k], self.delta_max))
 
         # ---- Objective ----
         # Terminal cost with angle-wrap-safe heading penalty
@@ -159,7 +167,7 @@ class InterceptionMPC:
         )
 
         # Running cost (control effort)
-        control_cost = 0
+        control_cost = 0.0
         for k in range(N_steps):
             control_cost += (
                 self.R[0, 0] * U[0, k] ** 2
@@ -168,27 +176,44 @@ class InterceptionMPC:
 
         opti.minimize(terminal_cost + control_cost)
 
-        # ---- Solver options ----
-        p_opts = {"expand": True}
-        s_opts = {
-            "print_level": 0,
-            "max_iter": 300,
-            "tol": 1e-4,
-            "acceptable_tol": 1e-3,
-        }
-        opti.solver("ipopt", p_opts, s_opts)
+        opti.solver("ipopt", self._p_opts, self._s_opts)
 
         # ---- Set parameter values ----
         opti.set_value(p_x0, current_state)
         opti.set_value(p_xT, target_strike_state)
 
-        # ---- Warm-start: straight-line initial guess ----
-        for k in range(N_steps + 1):
-            alpha = k / N_steps
-            x_guess = (1 - alpha) * current_state + alpha * target_strike_state
-            opti.set_initial(X[:, k], x_guess)
+        # ---- Warm-start: kinematically feasible pursuit-based initial guess ----
+        X_guess = np.zeros((4, N_steps + 1))
+        U_guess = np.zeros((2, N_steps))
+        X_guess[:, 0] = current_state
+
+        x_curr = current_state.copy()
         for k in range(N_steps):
-            opti.set_initial(U[:, k], [0.0, 0.0])
+            # Compute line-of-sight angle to target position
+            dx = target_strike_state[0] - x_curr[0]
+            dy = target_strike_state[1] - x_curr[1]
+            theta_los = np.arctan2(dy, dx)
+            
+            # Simple proportional pursuit steering angle
+            dtheta = np.arctan2(np.sin(theta_los - x_curr[2]), np.cos(theta_los - x_curr[2]))
+            delta = np.clip(1.5 * dtheta, -self.delta_max, self.delta_max)
+            
+            # Linear acceleration to reach target speed
+            steps_left = N_steps - k
+            a = np.clip((target_strike_state[3] - x_curr[3]) / (steps_left * self.dt), -self.a_max, self.a_max)
+            
+            u_cand = np.array([a, delta])
+            U_guess[:, k] = u_cand
+            
+            # Propagate forward using symbolic RK4 integrator evaluated numerically
+            x_next = np.array(self.F(x_curr, u_cand)).flatten()
+            X_guess[:, k + 1] = x_next
+            x_curr = x_next
+
+        for k in range(N_steps + 1):
+            opti.set_initial(X[:, k], X_guess[:, k])
+        for k in range(N_steps):
+            opti.set_initial(U[:, k], U_guess[:, k])
 
         # ---- Solve ----
         try:

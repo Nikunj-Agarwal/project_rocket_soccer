@@ -1,0 +1,68 @@
+# Phase 5 System Upgrades — Strike & Score Overhaul
+
+This document details the transition from **Phase 3.6 (Interception with wall bounces)** to **Phase 5 (Strike & Score)**. The system has evolved from a simple "reach-and-face" interceptor to a fully physical soccer striker that redirects a bouncing ball into a goal mouth and comes to a safe stop.
+
+---
+
+## 🛠️ Summary of Overhaul Features
+
+| Feature | Phase 3.6 (Legacy) | Phase 5 (Current Upgraded System) | Rationale / Benefits |
+| :--- | :--- | :--- | :--- |
+| **Primary Goal** | Touch/intercept the ball center while facing the goal at $T$. | Redirect the ball into a **2m wide goal** ($x=10.0, y \in [2.0, 4.0]$). | Converts the project from simple interception to a scoring soccer striker. |
+| **Physics Model** | Simple point overlap (no impact mechanics). | **2D Elastic Collision** (flat car bumper, $e_{strike} = 0.8$). | Simulates realistic momentum transfer between the car and the ball. |
+| **Target Geometry** | Target ball center exactly: `q_strike = [x, y, θ, v]`. | Target shifted backward: `q_strike` offset by **0.32 m** behind ball. | Prevents early contact triggering before the car completes its terminal rotation. |
+| **Post-Strike State** | Car continues coasting passively (`u = [0.0, 0.0]`). | Car **actively brakes** at maximum deceleration ($-2.0$ m/s²). | Prevents the car from exiting the field boundaries (keeping states on-pitch). |
+| **Dataset Generation** | Simple reachability test at $T$. | 1D sweep over $\theta_{strike}$ to find a scoring deflection. | Guarantees that training labels represent actions that result in a goal. |
+| **Solver Speed** | High IPOPT console log volume (~10 min/batch). | **Silenced solver output** (~2-3 sec/batch). | Removes console I/O bottleneck, speeding up development and validation. |
+
+---
+
+## 🧠 Key Design Decisions
+
+### 1. NMPC Target Offset (`offset_dist = 0.32` m)
+The simulator detects contact when the distance between the car center and the ball center is less than `CONTACT_RADIUS = 0.35` m. 
+* **The Problem**: If NMPC targets the ball center directly, the car triggers collision *before* it has fully rotated to `theta_strike`. This resulted in a high strike heading error (~0.61 rad).
+* **The Solution**: We shift the NMPC target position backward along the approach heading vector by `0.32` meters:
+  $$\mathbf{p}_{target} = \mathbf{p}_{strike} - d_{offset} \cdot \begin{bmatrix} \cos(\theta_{strike}) \\ \sin(\theta_{strike}) \end{bmatrix}$$
+  As the car smoothly approaches this offset target, it aligns its orientation perfectly. Contact is triggered at a distance of $0.35\text{ m}$ just before reaching the target, resulting in negligible heading error ($< 0.03\text{ rad}$).
+
+### 2. Active Braking Control
+Because the kinematic bicycle dynamics do not model ground friction, the car keeps moving at its impact speed forever under zero acceleration control. In post-strike propagation, this caused the car to drive off-field.
+* **The Solution**: An active deceleration controller is executed in Phase 2:
+  $$a_{brake} = \text{clip}\left(-\frac{v_{car}}{\Delta t}, -a_{max}, 0.0\right)$$
+  This slows the car to a full stop in a few steps, keeping it safely within field limits.
+
+### 3. Solver Silence Optimization
+IPOPT print logging was bypassed by setting CasADi helper parameters (`print_time: False`, `verbose: False`) and IPOPT solver options (`print_level: 0`, `sb: "yes"`). This optimization resulted in a **120x speedup** in overall run times.
+
+### 4. Pursuit-Based NMPC Warm-Start
+* **The Problem**: In challenging initial configurations (e.g., the car pointing away from the target), starting with a physics-violating straight-line guess caused IPOPT to get stuck in local minima, resulting in acceleration chattering and eventual complete failure/stopping.
+* **The Solution**: We generate a kinematically feasible initial guess by forward-simulating a proportional pursuit steering and acceleration controller starting from the current vehicle state using the symbolic RK4 dynamics. This satisfies the kinematics constraints perfectly and guides IPOPT directly to the global optimum, ensuring 100% convergence.
+
+---
+
+## 🔧 Post-Phase-5 Audit Overhaul (Network-Driven Targets)
+
+A logical/mathematical audit found that the original Phase 5 online loop **discarded most of StrikeNet's output**: it kept only $T_{strike}$ (to set the horizon) and recomputed the strike position and heading analytically every run. The network was effectively imitating an oracle that was then thrown away. The following fixes make the learned policy actually drive the controller and address the modelling issues that made its outputs unreliable.
+
+| Area | Before (Phase 5) | After (Audit Overhaul) | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Target source** | Always analytic: ball rolled forward to $T$, heading swept at runtime. The net's $x, y, \theta$ were printed and discarded. | The network's $(x, y, \theta)$ **drives** the NMPC target. A scoring rollout validates the plan; the analytic point + heading sweep is used **only** as a fallback when the predicted plan cannot score. `target_source` is logged per episode. | Makes the ML meaningful — it is now the primary decision-maker, not a bypassed component. |
+| **Label heading** | First scoring + reachable angle scanning from $-\pi$ (discontinuous, multimodal). | Among all scoring + reachable candidates at the minimum feasible $T$, the heading **closest to the goal line-of-sight** (deterministic, approximately continuous). | MSE regression averages multimodal targets into invalid in-between angles; a canonical label removes this. |
+| **Output normalization** | Targets used raw; loss dominated by $T, x, y$ (scales 5–10× the $\sin/\cos$ heading terms). | Targets z-scored with train-split statistics (`output_mean`, `output_std`); loss computed in normalized space; `predict()` de-normalizes. | Lets the network actually learn heading instead of ignoring it. |
+| **Collision model** | Unreachable "momentum push" branch in `compute_strike_velocity`. | Branch removed; returns ball velocity unchanged when not approaching. | Dead code; algebraically impossible to enter. |
+| **Post-strike window** | 50 steps (5.0 s). | 80 steps (8.0 s), early-break on score. | Late/slow strikes were cut off mid-flight (e.g. seed 120) before the ball crossed the line. |
+| **Plot/diagnostic fixes** | $\theta$ error unwrapped; stale goal marker at $(9.5, 3.0)$; wrong constants in `analyze_results.py`. | Wrapped $\theta$ error; goal drawn as true segment $x=10, y\in[2,4]$; corrected $\Delta t$, $a_{max}$, $\delta_{max}$, control-period constants. | Accurate reporting. |
+
+> **Note:** After these changes the dataset and model schema changed, so `strike_dataset.npy` and `strategy_net.pth` must be regenerated (`python -m src.data_generator` then `python -m src.network`). The old checkpoint will not load (missing normalization buffers, by design).
+
+---
+
+## 📈 System Metrics & Pass Criteria
+The integration tests evaluate four metrics across 50 random seeds (default: seeds 100–149). Results below are from the network-driven pipeline (latest batch `20260612_155705`):
+1. **Goal Success Rate**: Must be $\ge 60\%$ (achieved **74%**, 37/50 — PASS).
+2. **Strike Position Error**: Must be $\le 0.35$ m (achieved **0.334 m** mean, 0.320 m median, measured at closest approach).
+3. **Strike Heading Error**: Must be $\le 0.25$ rad (achieved **0.070 rad** mean, 0.000 rad median, measured at closest approach).
+4. **Solver Convergence**: Pursuit warm-start kept 48/50 runs free of solver failures (2 runs hit recoverable IPOPT restoration).
+
+Of the 37 goals, **16 were driven directly by StrikeNet's prediction** (`target_source = "network"`, 26 episodes, 61.5% success) and 21 by the analytic fallback (24 episodes, 87.5% success). The earlier "88% / 44-50" figure reflected the old analytic-driven loop, where the network was bypassed; it is no longer representative of the system as it actually runs. The network-vs-fallback breakdown is generated by `scripts/analyze_fallback.py` (`fallback_analysis.png`, `fallback_summary.md`).

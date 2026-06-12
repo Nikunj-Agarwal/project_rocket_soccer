@@ -24,10 +24,13 @@ MANUAL_RUNS_DIR = RUNS_DIR / "manual"
 
 # --- Named artifacts ---
 STRIKE_DATASET = DATASET_DIR / "strike_dataset.npy"
+DATASET_STATS = DATASET_DIR / "dataset_stats.json"
 TRAINING_LOG = TRAINING_DIR / "training_log.csv"
 PLOTS_DIR = REPORTS_DIR / "plots"
 PLOTS_GLOBAL_DIR = PLOTS_DIR / "global"
 PLOTS_INTEGRATION_DIR = PLOTS_DIR / "integration"
+BENCHMARKS_DIR = REPORTS_DIR / "benchmarks"
+SCALABILITY_CSV = BENCHMARKS_DIR / "scalability.csv"
 
 TRAJECTORY_CSV = "trajectory.csv"
 SIMULATION_MP4 = "simulation.mp4"

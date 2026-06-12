@@ -1,8 +1,8 @@
 # Robot Soccer Striker — Motion Planning
 
-Closed-loop interception: **StrikeNet** predicts when/where to strike; **NMPC** drives the car; **World** simulates car + bouncing ball on a 10×6 m field.
+Closed-loop striker: **StrikeNet** predicts when/where to intercept the ball; **NMPC** drives the car; **World** simulates the kinematic bicycle and bouncing ball, detecting elastic collisions to redirect the ball into the goal.
 
-**Documentation:** [docs/README.md](docs/README.md) — system overview, physics/constraints, pipeline logic, data & report plots.
+**Documentation:** [docs/README.md](docs/README.md) — system overview, physics/constraints, pipeline logic, data & report plots, and phase updates.
 
 ## Setup
 
@@ -38,18 +38,18 @@ Use the **striker** env for all commands below (`conda activate striker` or full
 conda activate striker
 cd D:\SNU\Semester_6\motion_planning\project_retry
 
-# 1) Dataset (bounce-aware labels)
+# 1) Dataset (scoring-aware labels, 1D theta sweep)
 python -m src.data_generator --num_samples 100000
 
 # 2) Train StrikeNet (uses GPU if CUDA available)
 python -m src.network
 
-# 3) Integration test — 10 seeds, each with trajectory + simulation.mp4 + metadata
+# 3) Integration test — 50 seeds (100–149), each with trajectory + simulation.mp4 + metadata
 python scripts/test_main.py
 
 # 4) Report plots → data/reports/plots/integration/{batch_id}/seed_{N}/
 python scripts/generate_plots.py
-python scripts/generate_plots.py --batch 20260521_022824
+python scripts/generate_plots.py --batch 20260522_035708
 ```
 
 Custom seeds:
@@ -68,14 +68,15 @@ python src/main.py --seed 10 --save-video
 
 | Path | Role |
 |------|------|
-| `src/simulator.py` | World dynamics + rendering |
-| `src/ball_physics.py` | Shared inelastic wall bounce |
-| `src/nmpc_solver.py` | CasADi shrinking-horizon MPC |
-| `src/network.py` | StrikeNet MLP |
-| `src/main.py` | Closed-loop simulation |
+| `src/simulator.py` | World dynamics (RK4 car, ball propagation) + rendering |
+| `src/ball_physics.py` | Shared inelastic wall bounce and elastic car-ball collision models |
+| `src/goal.py` | Goal mouth segment definition and scoring check |
+| `src/nmpc_solver.py` | CasADi shrinking-horizon MPC with pursuit-based warm-start and silenced solver logging |
+| `src/network.py` | StrikeNet MLP (7-D input to 5-D output) |
+| `src/main.py` | Closed-loop two-phase simulation (interception and braking/ball flight) |
 | `src/data_layout.py` | Canonical `data/` paths |
 | `scripts/` | Tests and `generate_plots.py` |
-| `models/strategy_net.pth` | Trained weights |
+| `models/strategy_net.pth` | Trained StrikeNet weights |
 | `data/` | Datasets, runs, tests, plots — see [`data/README.md`](data/README.md) |
 
 ## Phases
@@ -85,5 +86,6 @@ python src/main.py --seed 10 --save-video
 3. Real-time interception loop  
 3.6. Full-pipeline ball bounce  
 4. Report plots  
+5. **Strike & Score** (elastic bumper collisions, goal line scoring checks, active braking, target offset)
 
 Details: `data/phase_archives/`

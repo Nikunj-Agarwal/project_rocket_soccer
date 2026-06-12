@@ -52,7 +52,7 @@ conda activate striker
 python -m src.data_generator --num_samples 100000
 python -m src.network
 
-# Tests (integration: 10 seeds by default, each → simulation.mp4)
+# Tests (integration: 50 seeds by default, each → simulation.mp4)
 python scripts/test_network.py
 python scripts/test_static_target.py
 python scripts/test_main.py

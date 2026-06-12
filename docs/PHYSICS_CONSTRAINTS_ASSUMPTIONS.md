@@ -1,110 +1,93 @@
-# Physics, constraints, and assumptions
+# Physics, Constraints, and Assumptions — Phase 5
 
-## Field
+## 🏟️ Field & Goal Geometry
 
 | Parameter | Value | Source |
-|-----------|-------|--------|
-| Width `field_w` | 10.0 m | `DEFAULT_FIELD_W` in `ball_physics.py` |
-| Height `field_h` | 6.0 m | `DEFAULT_FIELD_H` |
-| Goal position | (9.5, 3.0) | `main.py`, `data_generator.py`, plots |
-| Playable region | Closed rectangle `[0, W] × [0, H]` | Walls are inclusive boundaries |
+| :--- | :--- | :--- |
+| **Field Width** (`field_w`) | 10.0 m | `DEFAULT_FIELD_W` in `ball_physics.py` |
+| **Field Height** (`field_h`) | 6.0 m | `DEFAULT_FIELD_H` in `ball_physics.py` |
+| **Goal Position** | Line segment at $x = 10.0$ for $y \in [2.0, 4.0]$ | `Goal` class in `src/goal.py` |
+| **Playable Region** | Closed rectangle $[0, W] \times [0, H]$ | Inclusive boundaries |
 
-**Assumption:** The field is flat; no obstacles except the four walls.
+* **Scoring Mouth**: Unlike other parts of the right wall ($x = 10.0$), the goal segment does not bounce the ball back; instead, the ball is allowed to pass through, triggering `scored = True` when its trajectory segment crosses the goal line.
 
-## Ball model
+---
 
-Implemented in `src/ball_physics.py` (`propagate_ball_step`, `propagate_ball_for_time`).
+## ⚽ Ball Physics & Collision Models
 
-| Parameter | Default | Meaning |
-|-----------|---------|---------|
-| `dt` | 0.1 s | Simulation / integration step (matches `World.dt` and MPC) |
-| `restitution` | **0.85** | Inelastic reflection: normal velocity component flips and scales by `e` |
-| `max_bounces` | 8 per step | Safety cap inside one `dt` sub-step |
+Implemented in `src/ball_physics.py` (`propagate_ball_step`, `propagate_ball_for_time`, `compute_strike_velocity`).
 
-**Behavior:**
+### 1. Ball-Wall Bounce Model
+* Between bounces, velocity is constant (no drag, gravity, or spin).
+* On wall impact, the normal velocity component flips and is scaled by the coefficient of restitution $e = 0.85$.
+* Position is clamped to the wall boundary upon impact.
 
-- Velocity is **constant** between wall contacts (no gravity, drag, or spin).
-- Walls are **axis-aligned** at `x = 0`, `x = W`, `y = 0`, `y = H`.
-- On impact, the component normal to the struck wall is multiplied by `-restitution`.
-- Position is clamped to the wall before reflecting velocity.
+### 2. Car-Ball Bumper Collision Model
+The car's front bumper is treated as a flat plane with normal vector $\mathbf{n} = [\cos(\theta_{car}), \sin(\theta_{car})]^T$. Let $\mathbf{v}_{car} = v_{car} \mathbf{n}$.
+* **Relative Velocity**: $\mathbf{v}_{rel} = \mathbf{v}_{ball} - \mathbf{v}_{car}$
+* **Normal Component**: $v_{rel,n} = \mathbf{v}_{rel} \cdot \mathbf{n}$
+* **Impact Reflection**: If $v_{rel,n} < 0$ (ball approaching the bumper along the normal):
+  $$\mathbf{v}_{ball}^{post} = \mathbf{v}_{ball} - (1 + e_{strike}) v_{rel,n} \mathbf{n}$$
+  where $e_{strike} = 0.8$.
+* **No impulse otherwise**: If $v_{rel,n} \ge 0$, the ball is already separating from the bumper at least as fast as the car along the normal, so no impulse is applied and $\mathbf{v}_{ball}^{post} = \mathbf{v}_{ball}$. (An earlier "momentum push" branch for this case was removed during the audit — it was algebraically unreachable, since $v_{rel,n} \ge 0$ is exactly the condition $\mathbf{v}_{ball} \cdot \mathbf{n} \ge v_{car}$, which made its inner test always false.)
 
-**Assumptions:**
+---
 
-- Ball–wall collisions are instantaneous.
-- Multiple bounces within one `dt` are resolved in sub-segments (piecewise linear motion).
-- Training labels, `main.py` strike target, and `World.step` all use this **same** integrator — no train/sim mismatch for bounce geometry.
+## 🚗 Car Kinematic & NMPC Constraints
 
-**Not modeled:** ball–car collision, ball–goal interaction, curvature of trajectories beyond bounces.
-
-## Car model (NMPC)
-
-`InterceptionMPC` in `src/nmpc_solver.py` uses a **kinematic bicycle** with RK4 discretization and IPOPT (`casadi.Opti`).
+`InterceptionMPC` in `src/nmpc_solver.py` solves a multiple-shooting nonlinear programming problem using CasADi and IPOPT.
 
 | Constraint | Value | Notes |
-|------------|-------|-------|
-| `dt` | 0.1 s | Must match `World.dt` |
-| Wheelbase `L` | 0.3 m | |
-| `v_min`, `v_max` | 0, 2.0 m/s | |
-| `delta_max` | π/4 rad | Steering symmetric |
-| `a_max` | 2.0 m/s² | Acceleration symmetric |
-| Terminal state | `[x, y, θ, v_impact]` | Default `v_impact = 1.0` m/s at strike |
-| Terminal weights `Q` | diag(500, 500, 100, 1) in `main.py` | Strong position/orientation tracking |
-| Running cost `R` | diag(0.01, 0.01) on `[a, δ]` | |
+| :--- | :--- | :--- |
+| **Step size** $\Delta t$ | 0.1 s | Must match simulator step size |
+| **Wheelbase** $L$ | 0.3 m | |
+| **Velocity bounds** | $[0.0, 2.0]$ m/s | |
+| **Steering bounds** $\delta$ | $[-\pi/4, \pi/4]$ rad | Symmetric limits |
+| **Acceleration bounds** $a$ | $[-2.0, 2.0]$ m/s² | Symmetric limits |
+| **Impact Speed** $v_{impact}$ | 1.0 m/s | Set as target in `main.py` |
+| **Terminal Weights** $\mathbf{Q}$ | diag(3000, 3000, 300, 1) | Penalizes position, heading, and speed |
+| **Running Cost** $\mathbf{R}$ | diag(0.005, 0.005) | Penalizes acceleration and steering effort |
 
-**Assumptions:**
+### Target Offset Position
+To prevent early contact triggers from disrupting orientation alignment, the target for the NMPC solver is offset backward from the chosen strike point $(x_{tgt}, y_{tgt}, \theta_{tgt})$ — which comes from StrikeNet directly when its plan scores, or from the analytic fallback otherwise:
+$$x_{target} = x_{tgt} - d_{offset} \cos(\theta_{tgt})$$
+$$y_{target} = y_{tgt} - d_{offset} \sin(\theta_{tgt})$$
+where $d_{offset} = 0.32$ m (overridable via the `offset_dist` argument of `run_simulation`). This ensures the car's heading error is minimal at the exact moment of collision (`CONTACT_RADIUS = 0.35` m).
 
-- No slip; unicycle/bicycle kinematics are exact.
-- Obstacles are only implicit via planning to a strike point (no obstacle constraints in MPC).
-- One NMPC solve per step; only `u_0` is applied (receding horizon).
+### Pursuit-Based Warm-Start
+The NMPC solver initializes its decision variables with a kinematically feasible trajectory generated by forward-simulating a proportional pursuit controller:
+1. At each step, a line-of-sight angle to the target is computed.
+2. A proportional steering command ($\delta = 1.5 \cdot \Delta\theta_{LoS}$, clipped to bounds) steers the vehicle toward the target.
+3. Acceleration is linearly interpolated to reach the target speed by the final step.
+4. The state is propagated using the same RK4 integrator used by the solver.
 
-## Data generation constraints
+This produces a warm-start that satisfies all kinematic constraints, guiding IPOPT away from local minima (e.g., chattering/stopping) that occur with naive straight-line initialization.
 
-`src/data_generator.py` samples until `num_samples` valid rows are collected.
+### Post-Strike Active Braking
+Post-strike, a braking controller decelerates the vehicle at the maximum rate ($-2.0$ m/s²) until it stops, ensuring it stays on the field:
+$$a_{brake} = \text{clip}\left(-\frac{v_{car}}{\Delta t}, -2.0, 0.0\right)$$
+The post-strike phase runs for up to 80 steps (8.0 s) but breaks immediately once the ball is scored, so the extended window only benefits late or slow strikes where the ball is still travelling toward the goal.
 
-**Sampling ranges (must match `main.py` / `test_main.py`):**
+---
 
-| Variable | Range |
-|----------|--------|
-| `ball_x` | [2, 8] m |
-| `ball_y` | [0, 6] m |
-| Ball speed | [0.5, 2.0] m/s, random direction |
-| `car_x` | [0, 4] m |
-| `car_y` | [0, 6] m |
-| `car_theta` | [−π, π] |
-| Car initial speed | 0 |
+## 📊 Dataset & Generation Constraints
 
-**Feasibility filter (per sample):**
+The generator (`src/data_generator.py`) generates reachable scoring scenarios:
+* **Ball Sampling**: Position $x_b \in [2.0, 8.0]$, $y_b \in [0.0, 6.0]$, speed $v_b \in [0.5, 2.0]$ m/s.
+* **Car Sampling**: Position $x_c \in [0.0, 4.0]$, $y_c \in [0.0, 6.0]$, heading $\theta_c \in [-\pi, \pi]$, speed $v_c = 0.0$.
+* **Scoring Heading Verification**: At each candidate time $T \in [0.5, 5.0]$ s, the generator sweeps 36 angular candidates $\theta_{strike} \in [-\pi, \pi]$ and collects every heading that both deflects the ball into the goal **and** is kinodynamically reachable at $T$. The label is taken at the first $T$ with at least one feasible heading; among those, the canonical heading is the one closest to the line-of-sight from the strike point to the goal center. If no feasible heading exists at any $T$, the sample is rejected.
 
-- Sweep `T` from 0.5 s to 5.0 s in 0.05 s steps.
-- Ball future position at `T` from **bounce-aware** integration.
-- **Reject** strike points outside the field (`0 ≤ x ≤ W`, `0 ≤ y ≤ H`).
-- **Reachability:** effective path length ≤ `d_max(T)` with bi-arc turning margin (`R_turn = 0.35` m) and trapezoidal speed limit (`v_max = 2`, `a_max = 2`).
-- Label = **first** (minimum) feasible `T` and corresponding `(x, y, θ_strike)` facing the goal.
+---
 
-**Assumptions:**
+## 🏁 Integration Test Success Criteria
 
-- Ground truth is geometric, not from NMPC rollouts.
-- If no `T` in the sweep is feasible, the sample is discarded (acceptance rate ~90% for 100k target).
-- Strike heading always points from strike point toward the goal.
+Evaluated in `scripts/test_main.py` over 50 distinct seeds (default batch: seeds 100–149):
 
-## Integration test success criteria
+| Metric | Threshold | Latest run (batch `20260612_155705`) |
+| :--- | :--- | :--- |
+| **Scored Goal Rate** | $\ge 60\%$ (at least 30 successes) | **74%** (37/50) — PASS |
+| **Avg Strike Position Error** | $\le 0.35$ m (at closest approach) | **0.334 m** mean / 0.320 m median — PASS |
+| **Avg Strike Heading Error** | $\le 0.25$ rad (at closest approach) | **0.070 rad** mean / 0.000 rad median — PASS |
+| **Solver Convergence** | Recoverable IPOPT failures rare | 48/50 runs with zero solver failures |
 
-`scripts/test_main.py`:
-
-| Criterion | Threshold |
-|-----------|-----------|
-| Per-run success | Final position error ≤ **0.2 m** AND heading error ≤ **0.15 rad** |
-| Batch pass | ≥ **80%** of seeds succeed **and** mean position error ≤ 0.2 m **and** mean heading error ≤ 0.15 rad |
-| On-field | Final ball and car positions inside `[0, W] × [0, H]` (logged; failure if OOB) |
-
-**Note:** A single bad seed (e.g. seed 7) can fail the batch on **mean** error even when 9/10 runs succeed.
-
-## Rendering vs physics
-
-`World.render` may clip the **view** for display; physics integration does **not** clamp ball/car position to the field except at walls for the ball. Final states should remain on-field when interception works; OOB finals indicate a bug or failed intercept.
-
-## Known limitations
-
-- StrikeNet `(x, y)` outputs are not directly used as the MPC target; only `T_strike` (via `N_steps`) and bounce physics define the terminal pose.
-- NMPC does not model future ball motion after the current step (target is fixed at horizon start).
-- Manual runs do not log StrikeNet raw predictions in `metadata.json` (only `strike_target` after bounce).
+Of the 37 goals, 16 came from episodes where StrikeNet's predicted strike point/heading was used directly (`target_source = "network"`, 26/50 episodes, 61.5% success) and 21 from the analytic fallback (24/50 episodes, 87.5% success). The fallback's higher success rate confirms the network's strike-*position* prediction remains the main accuracy bottleneck; see `scripts/analyze_fallback.py` for the full breakdown.

@@ -1,112 +1,140 @@
-# Data layout and report plots
+# Data Layout and Report Plots — Phase 5
 
-Path helpers live in `src/data_layout.py`. This document explains how to find **which run** produced **which plot**.
+Path helpers are defined in `src/data_layout.py`. This document describes the file layout, how to link evaluation plots back to their raw runs, and the database schema of outputs.
 
-## Directory tree
+---
+
+## 📁 Directory Structure
 
 ```text
-data/
-├── dataset/strike_dataset.npy
-├── training/training_log.csv
-├── reports/plots/
-│   ├── README.md                         # index of batches
-│   ├── global/                           # not batch-specific
-│   │   ├── training_curve.png
-│   │   └── strikenet_sample_errors.png
-│   └── integration/{batch_id}/           # one folder per test_main.py run
-│       ├── README.md                     # table: seed → source run path
-│       ├── integration_summary.png
-│       └── seed_{N}/
-│           ├── trajectory.png
-│           └── errors.png
-├── tests/integration/{batch_id}/
-│   ├── batch.log
-│   └── seed_{N}/
-│       ├── trajectory.csv      # source data for plots
-│       ├── simulation.mp4
-│       └── metadata.json
-├── tests/static/{batch_id}/...
-└── runs/manual/manual_seed{N}_{timestamp}/...
+project_root/
+├── data/
+│   ├── dataset/
+│   │   ├── strike_dataset.npy            # Generated training dataset
+│   │   └── dataset_stats.json            # Offline generation cost (wall-clock, per-sample search time)
+│   ├── training/
+│   │   └── training_log.csv              # MSE metrics per training epoch
+│   ├── reports/
+│   │   ├── benchmarks/
+│   │   │   └── scalability.csv           # Analytic-vs-network latency sweep (benchmark_scalability.py)
+│   │   └── plots/
+│   │       ├── README.md                 # Index of all generated test batches
+│   │       ├── global/                   # Batch-independent statistics
+│   │       │   ├── training_curve.png
+│   │       │   ├── strikenet_sample_errors.png
+│   │       │   └── scalability_curve.png # Amortization: analytic search vs StrikeNet inference
+│   │       └── integration/{batch_id}/   # Specific test batch directory
+│   │           ├── README.md             # Summary links of seeds
+│   │           ├── integration_summary.png
+│   │           ├── decision_latency.png  # Per-seed StrikeNet vs analytic latency
+│   │           ├── fallback_analysis.png # Network-vs-fallback breakdown (analyze_fallback.py)
+│   │           ├── fallback_summary.md   # Network-vs-fallback report + per-seed CSV
+│   │           ├── research_summary.md   # Full diagnostics report (analyze_results.py)
+│   │           └── seed_{N}/
+│   │               ├── trajectory.png    # Vehicle and ball paths
+│   │               └── errors.png        # Tracking errors vs steps
+│   └── tests/
+│       └── integration/{batch_id}/       # Raw test run logs & data
+│           ├── batch.log                 # Batch execution output
+│           └── seed_{N}/
+│               ├── trajectory.csv        # Numerical step series
+│               ├── simulation.mp4        # Rendered trajectory video
+│               └── metadata.json         # Episode configuration & metrics
+├── docs/
+│   ├── legacy/                           # Historic pre-Phase 5 documents
+│   │   ├── DATA_AND_REPORTS.md
+│   │   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
+│   │   ├── PIPELINE_LOGIC.md
+│   │   ├── README.md
+│   │   └── SYSTEM_OVERVIEW.md
+│   ├── DATA_AND_REPORTS.md               # (This document)
+│   ├── PHYSICS_CONSTRAINTS_ASSUMPTIONS.md
+│   ├── PIPELINE_LOGIC.md
+│   ├── SYSTEM_OVERVIEW.md
+│   ├── UPDATE.md                         # Detailed update summary
+│   └── README.md                         # Docs index
+└── models/
+    └── strategy_net.pth                  # Trained StrikeNet PyTorch weights
 ```
 
-## Batch ID
+---
 
-Integration batches are named by **timestamp** when `test_main.py` starts:
-
+## 🏷️ Batch ID
+Integration test batches are organized by timestamp:
 ```text
 YYYYMMDD_HHMMSS
 ```
+*Example*: `20260522_035708` matches the run initiated on May 22, 2026 at 03:57:08.
 
-Example: `20260521_022824` → run started 2026-05-21 02:28:24.
+---
 
-**Always cite this ID** when comparing plots, videos, or logs.
+## 🔄 Linking Plots to Raw Runs
 
-## Linking plots ↔ raw runs
+| To find the source of: | Look in this directory: |
+| :--- | :--- |
+| **Trajectory plot** `seed_10/trajectory.png` | `data/tests/integration/{batch_id}/seed_10/` |
+| **Numeric series for errors** | `data/tests/integration/{batch_id}/seed_10/trajectory.csv` |
+| **Evaluation video** | `data/tests/integration/{batch_id}/seed_10/simulation.mp4` |
+| **Goal pass/fail metadata** | `data/tests/integration/{batch_id}/seed_10/metadata.json` |
 
-| You have | Look here |
-|----------|-----------|
-| Plot `.../plots/integration/20260521_022824/seed_10/trajectory.png` | Raw run `data/tests/integration/20260521_022824/seed_10/` |
-| Video for that seed | `.../seed_10/simulation.mp4` |
-| Numeric series for errors plot | `.../seed_10/trajectory.csv` columns `pos_err`, `heading_err` |
-| Pass/fail for one seed | `.../seed_10/metadata.json` → `"success"` |
-| Whole batch summary | `.../integration/20260521_022824/batch.log` |
+---
 
-Open `data/reports/plots/integration/{batch_id}/README.md` — it lists every seed and the exact source folder.
-
-## Generating plots
-
+## 📈 Generating Report Plots
+To regenerate plots for the latest integration batch:
 ```powershell
-conda activate striker
-cd D:\SNU\Semester_6\motion_planning\project_retry
-
-# Latest integration batch
 python scripts/generate_plots.py
-
-# Specific batch (if you have multiple)
-python scripts/generate_plots.py --batch 20260521_022824
+```
+Or for a specific historical batch:
+```powershell
+python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 ```
 
-**Global** figures (training curve, StrikeNet sample errors) always go to `plots/global/`.
+---
 
-**Per-batch** figures only appear under `plots/integration/{batch_id}/`.
+## 📝 Output Formats
 
-## Old flat layout (removed)
+### 1. `trajectory.csv` Column Fields
 
-Do **not** look for PNGs directly under `data/reports/plots/` (except `README.md`).
+| Column | Data Type | Meaning |
+| :--- | :--- | :--- |
+| `step` | int | Simulation time step index. |
+| `phase` | str | `"approach"` (NMPC phase) or `"post_strike"` (coasting/braking phase). |
+| `N_rem` | int | Remaining NMPC horizon (0 in Phase 2). |
+| `car_x`, `car_y`, `car_theta`, `car_v` | float | State variables of the kinematic bicycle model. |
+| `ball_x`, `ball_y` | float | Coordinates of the ball center. |
+| `u_acc` | float | Input acceleration command. |
+| `u_steer` | float | Input steering angle command. |
+| `pos_err` | float | Distance between the car center and the ball center. The minimum value during the `approach` phase is used as the strike position error. |
+| `heading_err` | float | Orientation error relative to `theta_strike` (wrapped to $[-\pi, \pi]$). The value at the step of minimum `pos_err` is used as the strike heading error. |
+| `solve_ms` | float | Execution time of NMPC solver in milliseconds. |
 
-| Old path (deleted) | New path |
-|--------------------|----------|
-| `plots/training_curve.png` | `plots/global/training_curve.png` |
-| `plots/strikenet_sample_errors.png` | `plots/global/strikenet_sample_errors.png` |
-| `plots/trajectory_seed_10.png` | `plots/integration/{batch}/seed_10/trajectory.png` |
-| `plots/errors_seed_7.png` | `plots/integration/{batch}/seed_7/errors.png` |
+### 2. `metadata.json` Fields
 
-Re-run after integration tests: `python scripts/generate_plots.py --batch <batch_id>`.
+* `success` (bool): `True` if `scored` is `True` and `on_field` is `True`.
+* `final_pos_err_m` (float): Final position error at simulation termination.
+* `final_heading_err_rad` (float): Final heading error at simulation termination.
+* `solver_failures` (int): Number of steps NMPC failed to converge.
+* `N_steps` (int): Interception horizon steps.
+* `T_final_s` (float): Predicted interception time.
+* `ball_restitution` (float): Wall coefficient of restitution.
+* `field_size_m` (list of float): `[W, H]`.
+* `strike_target` (list of float): `[x_target, y_target, theta_target]` — the chosen strike point and heading (from StrikeNet when `target_source == "network"`, else from the analytic fallback).
+* `target_source` (str): `"network"` if StrikeNet's predicted strike point/heading passed the scoring rollout and was used directly, or `"fallback"` if the analytic strike point + heading sweep was substituted.
+* `net_vs_analytic_pos_m` (float): Distance between StrikeNet's predicted strike position and the analytically propagated ball position at `T_final`. A diagnostic for how accurate the network's spatial prediction was (larger values correlate with network-driven misses).
+* `scored` (bool): `True` if ball crossed the goal line.
+* `ball_struck` (bool): `True` if collision occurred.
+* `strike_step` (int): The step index where collision occurred.
+* `strikenet_infer_ms` (float): Median StrikeNet inference latency on CPU over `timing_repeats` warm-up-discarded repetitions (online decision-layer cost).
+* `analytic_strategy_ms` (float): Median latency of the equivalent analytic strike search on the same scene (timed for comparison only; does not drive control).
+* `speedup_factor` (float): `analytic_strategy_ms / strikenet_infer_ms` — the per-decision amortization factor.
+* `timing_device` (str): Device used for the latency comparison (e.g. `"cpu"`).
+* `timing_repeats` (int): Number of timed repetitions used for the medians.
 
-## Git ignore
+### 3. `dataset_stats.json` Fields (offline generation cost)
 
-`data/.gitignore` ignores generated `*.png`, `*.csv`, `*.mp4`, etc. Structure is kept via `.gitkeep` files; artifacts stay local.
-
-## trajectory.csv columns
-
-| Column | Meaning |
-|--------|---------|
-| `step` | MPC step index |
-| `N_rem` | Remaining horizon length |
-| `car_x`, `car_y`, `car_theta`, `car_v` | Car state after step |
-| `ball_x`, `ball_y` | Ball position after step |
-| `u_acc`, `u_steer` | Applied control |
-| `pos_err` | Distance car–ball |
-| `heading_err` | |car θ − strike θ| (wrapped) |
-| `solve_ms` | NMPC solve time |
-
-## metadata.json (integration / manual runs)
-
-Typical fields:
-
-- `success`, `final_pos_err_m`, `final_heading_err_rad`
-- `N_steps`, `T_final_s`, `ball_restitution`, `field_size_m`
-- `strike_target`: `[x, y, θ]` used by NMPC (bounce-correct)
-- `seed`, `ball_start`, `ball_vel`, `car_start` (when from tests/manual)
-
-StrikeNet raw `[T, x, y, θ]` predictions are **not** stored in metadata today (only console output).
+* `num_samples`, `total_attempts`, `acceptance_rate`: dataset size and search yield.
+* `wall_clock_s`: real elapsed time of the parallel generation run.
+* `total_cpu_search_s`: summed per-worker search time across all accepted samples.
+* `num_workers`: parallel worker processes used.
+* `mean_search_s_per_valid_sample`, `median_search_s_per_valid_sample`, `mean_search_s_per_attempt`: per-sample offline search cost (the expense amortized by StrikeNet).
+* `generation_params`: field/physics and search-grid parameters (`n_angles`, `t_min`, `t_max`, `t_step`) for provenance.
