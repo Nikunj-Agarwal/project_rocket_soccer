@@ -83,11 +83,11 @@ The generator (`src/data_generator.py`) generates reachable scoring scenarios:
 
 Evaluated in `scripts/test_main.py` over 50 distinct seeds (default batch: seeds 100–149):
 
-| Metric | Threshold | Latest run (batch `20260612_050403`) |
+| Metric | Threshold | Latest run (batch `20260612_155705`) |
 | :--- | :--- | :--- |
-| **Scored Goal Rate** | $\ge 60\%$ (at least 30 successes) | **62%** (31/50) — PASS |
-| **Avg Strike Position Error** | $\le 0.35$ m (at closest approach) | **0.329 m** — PASS |
-| **Avg Strike Heading Error** | $\le 0.25$ rad (at closest approach) | **0.088 rad** — PASS |
-| **On-field Constraint** | Both car and ball remain in $[0, W] \times [0, H]$ at termination | 49/50 on-field |
+| **Scored Goal Rate** | $\ge 60\%$ (at least 30 successes) | **74%** (37/50) — PASS |
+| **Avg Strike Position Error** | $\le 0.35$ m (at closest approach) | **0.334 m** mean / 0.320 m median — PASS |
+| **Avg Strike Heading Error** | $\le 0.25$ rad (at closest approach) | **0.070 rad** mean / 0.000 rad median — PASS |
+| **Solver Convergence** | Recoverable IPOPT failures rare | 48/50 runs with zero solver failures |
 
-Of the 31 goals, 18 came from episodes where StrikeNet's predicted strike point/heading was used directly (`target_source = "network"`, 30/50 episodes) and 13 from the analytic fallback (20/50 episodes). These results predate the increase of the post-strike window to 80 steps, which is expected to recover a small number of late-strike misses on re-run.
+Of the 37 goals, 16 came from episodes where StrikeNet's predicted strike point/heading was used directly (`target_source = "network"`, 26/50 episodes, 61.5% success) and 21 from the analytic fallback (24/50 episodes, 87.5% success). The fallback's higher success rate confirms the network's strike-*position* prediction remains the main accuracy bottleneck; see `scripts/analyze_fallback.py` for the full breakdown.

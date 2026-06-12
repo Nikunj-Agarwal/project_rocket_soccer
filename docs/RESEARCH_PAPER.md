@@ -1,7 +1,7 @@
 # Autonomous Soccer Striker: A Hybrid Approach using Imitation Learning and Non-linear Model Predictive Control
 
 ## Abstract
-This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) that predicts the interception time, strike position, and strike heading with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. The network's predicted strike plan drives the NMPC target directly; a physics-based scoring rollout validates each plan and an analytic interception point with a heading sweep is substituted only when the learned plan provably cannot score. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests over 50 randomized scenarios demonstrate a 62% goal-scoring success rate (with the network's prediction driving the controller end-to-end in 60% of episodes), an average strike position error of 0.329 m, and an average heading error of 0.088 rad.
+This paper presents a hybrid control architecture for an autonomous robotic soccer striker tasked with intercepting a moving, bouncing ball and deflecting it into a goal. The system combines an offline imitation learning strategy network (StrikeNet) that predicts the interception time, strike position, and strike heading with an online, shrinking-horizon Non-linear Model Predictive Control (NMPC) solver for precise kinematic execution. The network's predicted strike plan drives the NMPC target directly; a physics-based scoring rollout validates each plan and an analytic interception point with a heading sweep is substituted only when the learned plan provably cannot score. By incorporating elastic collision models, target-offset heuristics, pursuit-based warm-starting, and post-strike active braking, the system overcomes real-time kinodynamic constraints. Integration tests over 50 randomized scenarios demonstrate a 74% goal-scoring success rate (with the network's prediction driving the controller end-to-end in 52% of episodes), an average strike position error of 0.334 m, and an average heading error of 0.070 rad.
 
 ---
 
@@ -123,7 +123,7 @@ Terminal cost weights $\mathbf{Q} = \text{diag}(3000, 3000, 300, 1)$ heavily pen
 
 $$x_{target} = x_{tgt} - d_{offset} \cos(\theta_{tgt}), \quad y_{target} = y_{tgt} - d_{offset} \sin(\theta_{tgt})$$
 
-This offset is carefully tuned: the contact detection radius is 0.35 m, so an offset of 0.32 m ensures the car enters the contact zone with its heading fully aligned to $\theta_{strike}$. Without this offset, heading error at the moment of collision was approximately 0.61 rad; with it, heading error drops to approximately 0.03 rad.
+This offset is carefully tuned: the contact detection radius is 0.35 m, so an offset of 0.32 m ensures the car enters the contact zone with its heading fully aligned to $\theta_{strike}$. Without this offset, heading error at the moment of collision was approximately 0.61 rad; with it, heading error drops to a median of essentially 0 rad (mean 0.070 rad over the batch).
 
 <!-- 📊 FIGURE 8: Comparison showing the effect of the target offset on heading error at contact.
      Two side-by-side trajectory plots: (a) without offset (high heading error, ~0.61 rad)
@@ -136,7 +136,7 @@ This offset is carefully tuned: the contact detection radius is 0.35 m, so an of
 3. Acceleration is linearly interpolated to reach the desired impact speed by the final step.
 4. The state is propagated using the same RK4 integrator as the NMPC dynamics.
 
-This produces a warm-start trajectory that satisfies all kinematic constraints, guiding IPOPT away from local minima (e.g., acceleration chattering, premature stopping) that arise with naive straight-line initialization. In practice, the pursuit warm-start eliminated solver convergence failures entirely, achieving 100% IPOPT convergence across all 50 test runs.
+This produces a warm-start trajectory that satisfies all kinematic constraints, guiding IPOPT away from local minima (e.g., acceleration chattering, premature stopping) that arise with naive straight-line initialization. In practice, the pursuit warm-start kept 48 of 50 test runs entirely free of solver failures, with only 2 runs triggering recoverable IPOPT restoration phases.
 
 **Solver Performance.** By suppressing IPOPT console output (`print_level: 0`, `sb: "yes"`) and CasADi's I/O overhead (`print_time: False`, `verbose: False`), the system achieved a 120× execution speedup. The NMPC solver averages approximately 60 ms per step with a maximum of 300 iterations per solve.
 
@@ -157,29 +157,29 @@ The system was validated using a rigorous integration test suite over 50 randomi
 
 ### 5.1 Aggregate Performance
 
-Results are reported for the network-driven pipeline (batch `20260612_050403`):
+Results are reported for the network-driven pipeline (latest batch `20260612_155705`):
 
 | Metric | Target | Achieved |
 |:---|:---|:---|
-| **Goal Success Rate** | ≥ 60% | **62%** (31/50) |
-| **Avg Strike Position Error** | ≤ 0.35 m | **0.329 m** |
-| **Avg Strike Heading Error** | ≤ 0.25 rad | **0.088 rad** (≈ 5.0°) |
-| **On-field Safety** | — | **49/50** on-field |
-| **Solver Convergence** | — | **100%** (0 failures) |
+| **Goal Success Rate** | ≥ 60% | **74%** (37/50) |
+| **Avg Strike Position Error** | ≤ 0.35 m | **0.334 m** (median 0.320 m) |
+| **Avg Strike Heading Error** | ≤ 0.25 rad | **0.070 rad** (median 0.000 rad) |
+| **Solver Convergence** | — | **48/50** runs with zero solver failures |
 
-The pursuit-based warm-start eliminated solver convergence failures entirely, achieving 100% IPOPT convergence across all 50 runs.
+The pursuit-based warm-start kept 48 of 50 runs entirely free of solver failures; only 2 runs triggered recoverable IPOPT restoration phases.
 
-**Network vs. fallback contribution.** In 30 of 50 episodes StrikeNet's predicted strike point and heading passed the scoring rollout and drove the controller directly (`target_source = "network"`), scoring 18/30 (60%). In the remaining 20 episodes the analytic fallback was engaged, scoring 13/20 (65%). The comparable success rates indicate the learned policy is performing at parity with the analytic planner on the cases it commits to, while the fallback safely covers the cases where its prediction is unreliable.
+**Network vs. fallback contribution.** In 26 of 50 episodes StrikeNet's predicted strike point and heading passed the scoring rollout and drove the controller directly (`target_source = "network"`), scoring 16/26 (61.5%). In the remaining 24 episodes the analytic fallback was engaged, scoring 21/24 (87.5%). The fallback's higher success rate is expected — it only engages when the predicted plan provably fails the rollout, and it then uses the exact analytic search — but the gap also confirms that the network's predicted strike *position* remains the primary accuracy bottleneck. This breakdown is produced automatically by `scripts/analyze_fallback.py`.
 
-**Failure analysis.** The 19 failures are dominated by network-driven episodes in which the predicted strike *position* was inaccurate: the controller drives to the predicted point, but the diagnostic `net_vs_analytic_pos_m` reveals the ball is elsewhere by more than the 0.35 m contact radius, so contact is missed or mistimed. Failed network episodes cluster at large position discrepancies (e.g. 0.43 m, 0.29 m, 0.28 m), whereas tight predictions (< 0.15 m) almost always score. A second, smaller failure mode is late/slow strikes whose post-strike ball flight was truncated by the simulation window; the post-strike window has since been extended from 5.0 s to 8.0 s to mitigate this. Note that because the scoring rollout validates only the predicted *heading*-at-position and not the positional accuracy itself, a confidently-wrong position is still trusted — this is the principal accuracy ceiling of the current network-driven design.
+**Failure analysis.** The 13 failures are dominated by network-driven episodes (10 of 13) in which the predicted strike *position* was inaccurate: the controller drives to the predicted point, but the diagnostic `net_vs_analytic_pos_m` reveals the ball is elsewhere by more than the 0.35 m contact radius, so contact is missed or mistimed. A second, smaller failure mode is late/slow strikes whose post-strike ball flight was truncated by the simulation window; the post-strike window has been extended from 5.0 s to 8.0 s to mitigate this. Note that because the scoring rollout validates only the predicted *heading*-at-position and not the positional accuracy itself, a confidently-wrong position is still trusted — this is the principal accuracy ceiling of the current network-driven design.
 
 <!-- 📊 FIGURE 10: Integration summary bar chart — per-seed final position error and heading error
      side by side, with pass/fail annotation. See scripts/generate_plots.py → plot_integration_summary().
      This is the key results figure. -->
 
-<!-- 📊 FIGURE 11: Stacked/grouped bar chart showing the breakdown of 31 successes vs. 19 failures
-     across the 50 test seeds, split by target_source (network vs. fallback). Optionally overlay
-     net_vs_analytic_pos_m to show the correlation between large position error and network-driven misses. -->
+<!-- 📊 FIGURE 11: Stacked/grouped bar chart showing the breakdown of 37 successes vs. 13 failures
+     across the 50 test seeds, split by target_source (network vs. fallback). This is produced by
+     scripts/analyze_fallback.py (fallback_analysis.png), which also overlays per-source success
+     rates and strike-error distributions. -->
 
 ### 5.2 Representative Trajectories
 
@@ -242,7 +242,7 @@ The fundamental motivation for learning a strike planner rather than computing o
 
 ## 7. Conclusion
 
-This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture in which the learned strike plan drives the controller directly — with a physics-based scoring rollout providing a safety fallback — achieving 62% goal-scoring accuracy over 50 diverse randomized scenarios (the network's prediction driving execution in 60% of episodes); (2) a pursuit-based warm-start strategy that guarantees 100% solver convergence; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to under 0.03 rad; and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks, while the analysis identifies open-loop strike-position error as the primary accuracy ceiling and motivates closed-loop re-querying as the natural next step.
+This project successfully demonstrates that decomposing non-holonomic dynamic interception into a machine learning strategy layer and an analytical NMPC execution layer provides a robust, real-time solution for autonomous soccer striking. The key contributions are: (1) a hybrid StrikeNet + NMPC architecture in which the learned strike plan drives the controller directly — with a physics-based scoring rollout providing a safety fallback — achieving 74% goal-scoring accuracy over 50 diverse randomized scenarios (the network's prediction driving execution in 52% of episodes); (2) a pursuit-based warm-start strategy that keeps 48/50 runs free of solver failures; (3) a target-offset heuristic that reduces heading error at contact from 0.61 rad to a median of 0.000 rad (mean 0.070 rad); and (4) an integration of elastic collision physics with active post-strike braking for safe, on-field behavior. The system validates the principle that learned high-level strategy combined with deterministic low-level optimization yields a practical and effective control architecture for dynamic robotic interception tasks, while the analysis identifies open-loop strike-position error as the primary accuracy ceiling and motivates closed-loop re-querying as the natural next step.
 
 ---
 

@@ -42,10 +42,10 @@ substituted only when the learned plan provably cannot score. By
 incorporating elastic collision models, target-offset heuristics,
 pursuit-based warm-starting, and post-strike active braking, the
 system overcomes real-time kinodynamic constraints. Integration tests
-over 50 randomized scenarios demonstrate a 62\% goal-scoring success
+over 50 randomized scenarios demonstrate a 74\% goal-scoring success
 rate (with the network's prediction driving the controller end-to-end
-in 60\% of episodes), an average strike position error of 0.329\,m, and
-an average heading error of 0.088\,rad.
+in 52\% of episodes), an average strike position error of 0.334\,m, and
+an average heading error of 0.070\,rad.
 \end{abstract}
 
 %% ====================================================================
@@ -426,7 +426,8 @@ This offset is carefully tuned: the contact detection radius is
 0.35\,m, so an offset of 0.32\,m ensures the car enters the contact
 zone with its heading fully aligned to $\theta_s$. Without this
 offset, heading error at the moment of collision was approximately
-0.61\,rad; with it, heading error drops to approximately 0.03\,rad.
+0.61\,rad; with it, heading error drops to a median of essentially
+0\,rad (mean 0.070\,rad over the batch).
 
 \textbf{Pursuit-Based Warm-Start.} To ensure robust convergence
 across diverse initial configurations, the solver is warm-started with
@@ -447,9 +448,9 @@ forward-simulating a proportional pursuit controller. At each step:
 This produces a warm-start trajectory that satisfies all kinematic
 constraints, guiding IPOPT away from local minima (e.g., acceleration
 chattering, premature stopping) that arise with naive straight-line
-initialization. In practice, the pursuit warm-start eliminated solver
-convergence failures entirely, achieving 100\% IPOPT convergence
-across all 50 test runs.
+initialization. In practice, the pursuit warm-start kept 48 of 50 test
+runs entirely free of solver failures, with only 2 runs triggering
+recoverable IPOPT restoration phases.
 
 \textbf{Solver Performance.} Suppressing IPOPT console output
 (\texttt{print\_level:\,0}, \texttt{sb:\,"yes"}) and CasADi's I/O
@@ -495,24 +496,24 @@ distributions used in training.
 \begin{tabular}{@{}lcc@{}}
 \toprule
 \textbf{Metric} & \textbf{Target} & \textbf{Achieved} \\ \midrule
-Goal Success Rate & $\geq 60\%$ & \textbf{62\%} (31/50) \\
-Avg Strike Pos.\ Error & $\leq 0.35$\,m & \textbf{0.329\,m} \\
-Avg Strike Heading Error & $\leq 0.25$\,rad & \textbf{0.088\,rad} ($\approx 5.0^{\circ}$) \\
-On-field Safety & --- & \textbf{49/50} on-field \\
-Solver Convergence & --- & \textbf{100\%} (0 failures) \\
+Goal Success Rate & $\geq 60\%$ & \textbf{74\%} (37/50) \\
+Avg Strike Pos.\ Error & $\leq 0.35$\,m & \textbf{0.334\,m} (median 0.320) \\
+Avg Strike Heading Error & $\leq 0.25$\,rad & \textbf{0.070\,rad} (median 0.000) \\
+Solver Convergence & --- & \textbf{48/50} runs failure-free \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The pursuit-based warm-start eliminated solver convergence failures
-entirely, achieving 100\% IPOPT convergence across all 50 runs. In 30
-of 50 episodes StrikeNet's predicted strike point and heading passed
+The pursuit-based warm-start kept 48 of 50 runs entirely free of solver
+failures; only 2 runs triggered recoverable IPOPT restoration phases. In
+26 of 50 episodes StrikeNet's predicted strike point and heading passed
 the scoring rollout and drove the controller directly
-(\texttt{target\_source = network}), scoring 18/30 (60\%); in the
-remaining 20 episodes the analytic fallback was engaged, scoring 13/20
-(65\%). The comparable rates indicate the learned policy performs at
-parity with the analytic planner on the cases it commits to, while the
-fallback safely covers cases where its prediction is unreliable.
+(\texttt{target\_source = network}), scoring 16/26 (61.5\%); in the
+remaining 24 episodes the analytic fallback was engaged, scoring 21/24
+(87.5\%). The fallback only engages when the learned plan provably fails
+the rollout and then uses the exact analytic search, so its higher rate
+is expected; the gap confirms the network's strike-position prediction
+remains the principal accuracy bottleneck.
 
 \subsection{Detailed Descriptive Statistics}
 
@@ -854,13 +855,13 @@ for autonomous soccer striking. The key contributions are:
 \begin{enumerate}
     \item A hybrid StrikeNet + NMPC architecture in which the learned
       strike plan drives the controller directly---with a physics-based
-      scoring rollout providing a safety fallback---achieving 62\%
+      scoring rollout providing a safety fallback---achieving 74\%
       goal-scoring accuracy over 50 diverse randomized scenarios (the
-      network driving execution in 60\% of episodes).
-    \item A pursuit-based warm-start strategy that guarantees 100\%
-      solver convergence.
+      network driving execution in 52\% of episodes).
+    \item A pursuit-based warm-start strategy that keeps 48/50 runs
+      free of solver failures.
     \item A target-offset heuristic that reduces heading error at
-      contact from 0.61\,rad to under 0.03\,rad.
+      contact from 0.61\,rad to a median of 0\,rad (mean 0.070\,rad).
     \item An integration of elastic collision physics with active
       post-strike braking for safe, on-field behavior.
 \end{enumerate}

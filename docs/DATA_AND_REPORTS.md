@@ -10,20 +10,29 @@ Path helpers are defined in `src/data_layout.py`. This document describes the fi
 project_root/
 ├── data/
 │   ├── dataset/
-│   │   └── strike_dataset.npy            # Generated training dataset
+│   │   ├── strike_dataset.npy            # Generated training dataset
+│   │   └── dataset_stats.json            # Offline generation cost (wall-clock, per-sample search time)
 │   ├── training/
 │   │   └── training_log.csv              # MSE metrics per training epoch
-│   ├── reports/plots/
-│   │   ├── README.md                     # Index of all generated test batches
-│   │   ├── global/                       # Batch-independent training statistics
-│   │   │   ├── training_curve.png
-│   │   │   └── strikenet_sample_errors.png
-│   │   └── integration/{batch_id}/       # Specific test batch directory
-│   │       ├── README.md                 # Summary links of seeds
-│   │       ├── integration_summary.png   # Performance chart for this batch
-│   │       └── seed_{N}/
-│   │           ├── trajectory.png        # Vehicle and ball paths
-│   │           └── errors.png            # Tracking errors vs steps
+│   ├── reports/
+│   │   ├── benchmarks/
+│   │   │   └── scalability.csv           # Analytic-vs-network latency sweep (benchmark_scalability.py)
+│   │   └── plots/
+│   │       ├── README.md                 # Index of all generated test batches
+│   │       ├── global/                   # Batch-independent statistics
+│   │       │   ├── training_curve.png
+│   │       │   ├── strikenet_sample_errors.png
+│   │       │   └── scalability_curve.png # Amortization: analytic search vs StrikeNet inference
+│   │       └── integration/{batch_id}/   # Specific test batch directory
+│   │           ├── README.md             # Summary links of seeds
+│   │           ├── integration_summary.png
+│   │           ├── decision_latency.png  # Per-seed StrikeNet vs analytic latency
+│   │           ├── fallback_analysis.png # Network-vs-fallback breakdown (analyze_fallback.py)
+│   │           ├── fallback_summary.md   # Network-vs-fallback report + per-seed CSV
+│   │           ├── research_summary.md   # Full diagnostics report (analyze_results.py)
+│   │           └── seed_{N}/
+│   │               ├── trajectory.png    # Vehicle and ball paths
+│   │               └── errors.png        # Tracking errors vs steps
 │   └── tests/
 │       └── integration/{batch_id}/       # Raw test run logs & data
 │           ├── batch.log                 # Batch execution output
@@ -115,3 +124,17 @@ python scripts/generate_plots.py --batch YYYYMMDD_HHMMSS
 * `scored` (bool): `True` if ball crossed the goal line.
 * `ball_struck` (bool): `True` if collision occurred.
 * `strike_step` (int): The step index where collision occurred.
+* `strikenet_infer_ms` (float): Median StrikeNet inference latency on CPU over `timing_repeats` warm-up-discarded repetitions (online decision-layer cost).
+* `analytic_strategy_ms` (float): Median latency of the equivalent analytic strike search on the same scene (timed for comparison only; does not drive control).
+* `speedup_factor` (float): `analytic_strategy_ms / strikenet_infer_ms` — the per-decision amortization factor.
+* `timing_device` (str): Device used for the latency comparison (e.g. `"cpu"`).
+* `timing_repeats` (int): Number of timed repetitions used for the medians.
+
+### 3. `dataset_stats.json` Fields (offline generation cost)
+
+* `num_samples`, `total_attempts`, `acceptance_rate`: dataset size and search yield.
+* `wall_clock_s`: real elapsed time of the parallel generation run.
+* `total_cpu_search_s`: summed per-worker search time across all accepted samples.
+* `num_workers`: parallel worker processes used.
+* `mean_search_s_per_valid_sample`, `median_search_s_per_valid_sample`, `mean_search_s_per_attempt`: per-sample offline search cost (the expense amortized by StrikeNet).
+* `generation_params`: field/physics and search-grid parameters (`n_angles`, `t_min`, `t_max`, `t_step`) for provenance.
