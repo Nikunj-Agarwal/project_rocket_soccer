@@ -35,8 +35,8 @@ from src.data_layout import (
     integration_seed_run,
 )
 
-# Default batch: 50 seeds for a comprehensive evaluation
-DEFAULT_INTEGRATION_SEEDS = list(range(100, 150))
+# Default batch: 100 seeds for a comprehensive evaluation
+DEFAULT_INTEGRATION_SEEDS = list(range(100, 200))
 
 
 def setup_logging(batch_dir: str) -> logging.Logger:
@@ -154,7 +154,8 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "strike_heading_err": strike_heading_err,
             "final_ball": final_ball,
             "final_car": final_car,
-            "error_msg": ""
+            "target_source": meta.get("target_source", "unknown"),
+            "error_msg": "",
         }
         
     except Exception as e:
@@ -165,9 +166,10 @@ def _run_single_seed(seed: int, batch_dir: str, no_video: bool) -> dict:
             "on_field": False,
             "strike_pos_err": 999.0,
             "strike_heading_err": 999.0,
-            "final_ball": np.array([0,0]),
-            "final_car": np.array([0,0]),
-            "error_msg": str(e)
+            "final_ball": np.array([0, 0]),
+            "final_car": np.array([0, 0]),
+            "target_source": "unknown",
+            "error_msg": str(e),
         }
 
 
@@ -178,7 +180,7 @@ def main():
         type=int,
         nargs="+",
         default=DEFAULT_INTEGRATION_SEEDS,
-        help="Random seeds to run (default: 50 seeds, 100-149)",
+        help="Random seeds to run (default: 100 seeds, 100-199)",
     )
     parser.add_argument(
         "--no-video",
@@ -198,14 +200,19 @@ def main():
     pos_errors = []
     heading_errors = []
 
+    # Fallback/network tracking
+    net_total = 0;   net_success = 0
+    fb_total  = 0;   fb_success  = 0
+
     log.info("=" * 65)
     log.info("  PHASE 5 INTEGRATION TEST — Strike & Score with Pursuit Warm-Start")
     log.info(f"  Bounce: restitution={DEFAULT_BALL_RESTITUTION}, dt={DEFAULT_BALL_DT}, field={DEFAULT_FIELD_W}x{DEFAULT_FIELD_H}")
     log.info("=" * 65)
 
-    # CasADi/IPOPT and Matplotlib video rendering use a massive amount of RAM and stack memory.
-    # We must limit the concurrent workers here to prevent Out Of Memory (OOM) and Stack Overflow crashes.
-    num_workers = min(4, multiprocessing.cpu_count())
+    # CasADi/IPOPT and Matplotlib video rendering are memory-heavy.
+    # 6 workers is enough to keep all cores busy while staying within typical RAM limits.
+    # Lower to 4 if you observe OOM or IPOPT restoration errors.
+    num_workers = min(6, multiprocessing.cpu_count())
     log.info(f"  Running concurrently with {num_workers} thread workers to preserve RAM.")
 
     from tqdm import tqdm
@@ -221,20 +228,33 @@ def main():
             seed = future_to_seed[future]
             res = future.result()
             
-            log.info(f"\n--- Result for Seed {seed} ---")
-            
+            source = res["target_source"]  # "network", "fallback", or "unknown"
+            source_tag = f"[{source.upper():<8}]"
+
+            log.info(f"\n--- Seed {seed} | {source_tag} ---")
+
             if not res["crashed"]:
                 if not res["on_field"]:
                     log.warning(f"  [WARN] Final state left the field: ball={res['final_ball']}, car={res['final_car']}")
-                
+
                 if res["success"] and res["on_field"]:
                     successes += 1
-                    log.info(f"  [SUCCESS] Goal scored!")
+                    log.info(f"  {source_tag} [SUCCESS] Goal scored!")
                 else:
                     failures += 1
-                    log.info(f"  [FAILED]: Missed goal or left field.")
-                
+                    log.info(f"  {source_tag} [FAILED]: Missed goal or left field.")
+
                 log.info(f"  Strike errors: pos={res['strike_pos_err']:.4f} m | heading={res['strike_heading_err']:.4f} rad")
+
+                # Track per-source counts
+                if source == "network":
+                    net_total += 1
+                    if res["success"] and res["on_field"]:
+                        net_success += 1
+                elif source == "fallback":
+                    fb_total += 1
+                    if res["success"] and res["on_field"]:
+                        fb_success += 1
             else:
                 log.error(f"  [CRASH] Run crashed with exception: {res['error_msg']}")
                 failures += 1
@@ -252,11 +272,18 @@ def main():
     log.info("=" * 65)
     log.info("  INTEGRATION TEST SUMMARY")
     log.info("=" * 65)
+    net_rate = net_success / net_total * 100 if net_total else 0.0
+    fb_rate  = fb_success  / fb_total  * 100 if fb_total  else 0.0
+
     log.info(f"  Total runs       : {len(seeds)}")
-    log.info(f"  Goals (Success)  : {successes} / {len(seeds)}")
+    log.info(f"  Goals (Success)  : {successes} / {len(seeds)}  ({successes/len(seeds)*100:.1f}%)")
     log.info(f"  Misses (Fail)    : {failures} / {len(seeds)}")
     log.info(f"  Avg Strike Pos Error    : {np.mean(pos_errors):.4f} m  (target: <= 0.35)")
     log.info(f"  Avg Strike Heading Error: {np.mean(heading_errors):.4f} rad (target: <= 0.25)")
+    log.info("-" * 65)
+    log.info("  NETWORK vs FALLBACK BREAKDOWN")
+    log.info(f"  [NETWORK ] Episodes: {net_total:>3d}  |  Scored: {net_success:>3d}  |  Success rate: {net_rate:.1f}%")
+    log.info(f"  [FALLBACK] Episodes: {fb_total:>3d}  |  Scored: {fb_success:>3d}  |  Success rate: {fb_rate:.1f}%")
     log.info("-" * 65)
 
     # Pass criteria: at least 60% success, average errors below thresholds
@@ -266,7 +293,8 @@ def main():
         and np.mean(pos_errors) <= 0.35
         and np.mean(heading_errors) <= 0.25
     )
-    log.info(f"  Pass threshold     : {min_successes} / {len(seeds)} successes (60%)")
+    log.info(f"  Pass threshold     : {min_successes} / {len(seeds)} successes (60%)  "
+             f"[network {net_total} eps, fallback {fb_total} eps]")
 
     if passed:
         log.info("  [PASSED] INTEGRATION TEST PASSED!")

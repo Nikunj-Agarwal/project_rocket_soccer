@@ -57,7 +57,7 @@ python scripts/test_network.py
 ---------------------------------------------------------------------
 python scripts/test_main.py
 
-  - Runs seeds 100-149, each in a subprocess, 4 at a time
+  - Runs seeds 100-199 (100 seeds), each in a subprocess, 6 at a time
   - Saves per-seed video + trajectory + metadata under
     data/tests/integration/{batch_id}/seed_{N}/
   - Faster run without videos:
@@ -105,10 +105,13 @@ python -m scripts.benchmark_scalability
 
   - Sweeps n_angles in {18,36,72,144,288} across 200 random scenes
   - 30 timing repetitions per scene (warm-up discarded), median reported
+  - Analytic sweep uses ~75% CPU cores in parallel (same as data_generator)
   - Output: data/reports/benchmarks/scalability.csv
             data/reports/plots/global/scalability_curve.png
-  - Faster/slower via flags:
+  - Faster/smaller run:
       python -m scripts.benchmark_scalability --n-scenes 50 --repeats 10
+  - Force serial (debug): --workers 1
+  - Custom worker count: --workers 8
   - Use a specific trained model (default: models/strategy_net.pth):
       python -m scripts.benchmark_scalability --model-path <path>
 
