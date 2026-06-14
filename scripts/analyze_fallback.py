@@ -139,6 +139,7 @@ def plot_fallback_analysis(df: pd.DataFrame, stats: dict, output_dir: Path, batc
                 ha="center", va="bottom", fontsize=10, fontweight="bold")
     ax.set_xticks(x)
     ax.set_xticklabels([s.capitalize() for s in sources])
+    ax.set_ylim(0, max(counts) * 1.25 if max(counts) > 0 else 10)
     ax.set_ylabel("Episodes")
     ax.set_title("Episode count and goals scored by source")
     ax.legend(fontsize=9)

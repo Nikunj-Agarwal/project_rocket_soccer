@@ -164,11 +164,12 @@ def plot_integration_summary(
 
     x = np.arange(len(seeds))
     width = 0.35
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig_width = max(10, len(seeds) * 0.25)
+    fig, ax = plt.subplots(figsize=(fig_width, 5))
     ax.bar(x - width / 2, final_pos, width, label="Contact dist (m) [diag]", color="#1565c0")
     ax.bar(x + width / 2, final_head, width, label="Heading err (rad) [diag]", color="#e65100")
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{s}\n({'OK' if ok else 'X'})" for s, ok in zip(seeds, successes)], fontsize=8)
+    ax.set_xticklabels([f"{s}\n({'OK' if ok else 'X'})" for s, ok in zip(seeds, successes)], fontsize=8, rotation=90)
     ax.set_xlabel("Seed  (OK = strike-gated goal)")
     ax.set_title(f"Integration Batch {batch_id} — Contact Errors per Seed")
     ax.legend()

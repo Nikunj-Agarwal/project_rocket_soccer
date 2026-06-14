@@ -19,3 +19,7 @@ build/
 dist/
 
 # Note: data/ has its own .gitignore for generated artifacts
+docs/
+RUN_COMMANDS.txt
+run_commands.txt
+data/phase_archives/

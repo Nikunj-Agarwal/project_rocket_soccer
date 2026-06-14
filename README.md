@@ -2,7 +2,7 @@
 
 Closed-loop striker: **StrikeNet** (legacy or structured variant) predicts when/how to intercept; **NMPC** drives the car; **World** simulates the kinematic bicycle and bouncing ball with elastic collisions.
 
-**Documentation:** [docs/README.md](docs/README.md) — architecture, physics, pipeline, data layout, research paper (previous try vs current), and phase updates.
+**Documentation:** Detailed architectural, literature, and physics documentation is stored locally in the gitignored `docs/` directory (e.g., `docs/SYSTEM_OVERVIEW.md`, `docs/LITERATURE_REVIEWS.md`).
 
 ## Setup
 
@@ -17,7 +17,7 @@ pip install imageio imageio-ffmpeg
 ```powershell
 conda activate striker
 pip uninstall torch torchvision torchaudio -y
-pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cu126
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 ```
 
 Verify:
@@ -36,7 +36,7 @@ cd D:\SNU\Semester_6\motion_planning\project_retry
 .\run_pipeline.ps1 -NoVideo
 ```
 
-Steps: see [docs/PIPELINE_LOGIC.md](docs/PIPELINE_LOGIC.md). Results paths use `{LATEST_INTEGRATION_BATCH}` and `{LATEST_COMPARISON_RUN}` — see [docs/README.md](docs/README.md) placeholder note.
+Steps: See the local `docs/PIPELINE_LOGIC.md` for details on the evaluation steps. Results paths use `{LATEST_INTEGRATION_BATCH}` and `{LATEST_COMPARISON_RUN}` (as detailed in the local `docs/README.md`).
 
 Re-eval only (skip data + train):
 
@@ -97,11 +97,25 @@ python scripts/test_main.py --planner-mode neural --model-variant structured --n
 | `src/data_layout.py` | Paths for models, integration/comparison batches, plots |
 | `scripts/compare_modes.py` | 5-config comparison harness |
 | `scripts/analyze_comparison.py` | Cross-config cost/benefit after comparison |
-| `scripts/summarize_pipeline.py` | Consolidated pipeline summary |
+| `scripts/benchmark_scalability.py` | Generates scalability curves (NMPC vs Network) |
+| `scripts/analyze_fallback.py` | Analyzes fallback events in hybrid mode |
+| `scripts/generate_plots.py` | Generates trajectory and integration summary plots |
+| `scripts/analyze_results.py` | Generates diagnostic plots for latency and tracking |
+| `scripts/summarize_pipeline.py` | Consolidated pipeline summary markdown |
 | `scripts/test_main.py` | Integration batches + `summary.json` |
 | `models/strategy_net_{legacy,structured}.pth` | Trained weights |
 | `data/` | Datasets, runs, tests, reports — [data/README.md](data/README.md) |
 | `run_pipeline.ps1` / `run_pipeline.sh` | End-to-end 8-step eval pipeline |
+
+## Standalone Utilities (Not in main pipeline)
+
+| Path | Role |
+|------|------|
+| `scripts/sweep_offset.py` | Sweeps the heuristic target offset parameter |
+| `scripts/test_static_target.py` | Evaluates NMPC solver against static targets |
+| `scripts/verify_label_fidelity.py` | Diagnostic tool to verify dataset label sanity |
+| `scripts/inspect_pdf.py` | Helper script to inspect and extract PDF pages |
+| `scripts/test_torch.py` | Simple PyTorch and CUDA availability check |
 
 ## Phases
 
@@ -113,4 +127,4 @@ python scripts/test_main.py --planner-mode neural --model-variant structured --n
 5. Strike & Score  
 5+. Dual-model variants + 3-way planner comparison  
 
-Details: `data/phase_archives/`
+Details: local `data/phase_archives/` (gitignored)

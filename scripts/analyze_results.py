@@ -575,7 +575,7 @@ def plot_decision_latency(df_runs, output_dir: Path):
     med_speedup = (df_lat["analytic_strategy_ms"] / df_lat["decision_latency_ms"].clip(lower=1e-6)).median() if has_analytic else float("nan")
     ax.set_yscale("log")
     ax.set_xticks(x)
-    ax.set_xticklabels([f"s{s}" for s in df_lat["seed"].astype(int)], rotation=45, fontsize=7)
+    ax.set_xticklabels([f"s{s}" for s in df_lat["seed"].astype(int)], rotation=90, fontsize=7)
     ax.set_xlabel("Seed", fontsize=11)
     ax.set_ylabel("Decision latency (ms, log scale)", fontsize=11)
     title = f"Deployed Decision Latency (median {med_deployed:.2f} ms, n={len(df_lat)})"

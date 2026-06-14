@@ -1,11 +1,11 @@
 <!--
-DOC PLACEHOLDERS — see docs/README.md. Batch folders: {LATEST_INTEGRATION_BATCH}, {LATEST_COMPARISON_RUN}.
+DOC PLACEHOLDERS — see local docs/README.md. Batch folders: {LATEST_INTEGRATION_BATCH}, {LATEST_COMPARISON_RUN}.
 -->
 
 # Data directory
 
 All runtime artifacts live under `data/`. Path helpers: [`src/data_layout.py`](../src/data_layout.py).  
-**Logic & assumptions:** [`docs/README.md`](../docs/README.md).
+**Logic & assumptions:** See local `docs/README.md` (gitignored).
 
 ## Layout
 
@@ -74,7 +74,7 @@ Or run everything: `.\run_pipeline.ps1 -NoVideo` from project root (8 steps + au
 | `fallback_sweep_ms` | Hybrid fallback 36-heading sweep only |
 | `strikenet_infer_ms` | Diagnostic micro-benchmark (scalability) |
 
-See [docs/DATA_AND_REPORTS.md](../docs/DATA_AND_REPORTS.md).
+See local `docs/DATA_AND_REPORTS.md` (gitignored).
 
 ## Video output
 

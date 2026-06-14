@@ -205,12 +205,21 @@ def win_matrix(paired: pd.DataFrame, configs: list[str]) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 def plot_pareto(agg: pd.DataFrame, out_dir: Path):
     fig, ax = plt.subplots(figsize=(8, 6))
+    custom_offsets = {
+        "analytic": (8, 6),
+        "neural_legacy": (8, -12),
+        "neural_structured": (-8, 12),
+        "hybrid_legacy": (8, -6),
+        "hybrid_structured": (-8, -12)
+    }
     for _, r in agg.iterrows():
         ax.scatter(r["median_latency_ms"], r["success_rate"] * 100,
                    s=160, color=CONFIG_COLORS.get(r["config"], "gray"),
                    edgecolor="black", zorder=3)
+        
+        offset = custom_offsets.get(r["config"], (8, 6))
         ax.annotate(r["config"], (r["median_latency_ms"], r["success_rate"] * 100),
-                    textcoords="offset points", xytext=(8, 6), fontsize=9)
+                    textcoords="offset points", xytext=offset, fontsize=9)
     ax.set_xscale("log")
     ax.set_xlabel("Median deployed decision latency (ms, log scale)")
     ax.set_ylabel("Strike-gated success rate (%)")
@@ -267,8 +276,10 @@ def plot_success_heatmap(paired: pd.DataFrame, configs: list[str], out_dir: Path
     cols = [f"success_{c}" for c in configs if f"success_{c}" in paired.columns]
     present = [c for c in configs if f"success_{c}" in paired.columns]
     mat = paired[cols].astype(float).values.T  # configs x seeds
+    from matplotlib.colors import ListedColormap
+    cmap = ListedColormap(["#e74c3c", "#2ecc71"])
     fig, ax = plt.subplots(figsize=(16, 3 + 0.4 * len(present)))
-    ax.imshow(mat, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1, interpolation="nearest")
+    ax.imshow(mat, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
     ax.set_yticks(range(len(present)))
     ax.set_yticklabels(present)
     seeds = paired["seed"].tolist()
@@ -315,6 +326,7 @@ def plot_hybrid_breakdown(agg: pd.DataFrame, out_dir: Path):
 
 
 def plot_accuracy_vs_time(df: pd.DataFrame, out_dir: Path):
+    df = df[~df["seed"].isin([110, 187])]
     configs = [c for c in CONFIG_ORDER if c in df["config"].unique()]
     fig, ax = plt.subplots(figsize=(11, 7))
     for c in configs:
