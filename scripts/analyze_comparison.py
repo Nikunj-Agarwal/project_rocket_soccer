@@ -205,27 +205,18 @@ def win_matrix(paired: pd.DataFrame, configs: list[str]) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 def plot_pareto(agg: pd.DataFrame, out_dir: Path):
     fig, ax = plt.subplots(figsize=(8, 6))
-    custom_offsets = {
-        "analytic": (8, 6),
-        "neural_legacy": (8, -12),
-        "neural_structured": (-8, 12),
-        "hybrid_legacy": (8, -6),
-        "hybrid_structured": (-8, -12)
-    }
     for _, r in agg.iterrows():
         ax.scatter(r["median_latency_ms"], r["success_rate"] * 100,
                    s=160, color=CONFIG_COLORS.get(r["config"], "gray"),
-                   edgecolor="black", zorder=3)
+                   edgecolor="black", zorder=3, label=r["config"])
         
-        offset = custom_offsets.get(r["config"], (8, 6))
-        ax.annotate(r["config"], (r["median_latency_ms"], r["success_rate"] * 100),
-                    textcoords="offset points", xytext=offset, fontsize=9)
     ax.set_xscale("log")
     ax.set_xlabel("Median deployed decision latency (ms, log scale)")
     ax.set_ylabel("Strike-gated success rate (%)")
     ax.set_title("Success vs deployed decision time — is the neural net worth it?")
     ax.grid(True, which="both", alpha=0.3)
-    ax.set_ylim(0, 100)
+    ax.set_ylim(0, 105) # slight padding
+    ax.legend(title="Configurations", loc="lower right", framealpha=0.9)
     ax.text(0.02, 0.04, "upper-left = better\n(high success, low time)",
             transform=ax.transAxes, fontsize=9, style="italic",
             bbox=dict(boxstyle="round", fc="#fffbe6", ec="gray"))

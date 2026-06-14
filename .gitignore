@@ -23,3 +23,10 @@ docs/
 RUN_COMMANDS.txt
 run_commands.txt
 data/phase_archives/
+scripts/inspect_pdf.py
+scripts/sweep_offset.py
+scripts/test_torch.py
+scripts/verify_label_fidelity.py
+paper_graphs/
+scratch_plot.py
+scratch_plot_131.py

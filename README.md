@@ -2,8 +2,6 @@
 
 Closed-loop striker: **StrikeNet** (legacy or structured variant) predicts when/how to intercept; **NMPC** drives the car; **World** simulates the kinematic bicycle and bouncing ball with elastic collisions.
 
-**Documentation:** Detailed architectural, literature, and physics documentation is stored locally in the gitignored `docs/` directory (e.g., `docs/SYSTEM_OVERVIEW.md`, `docs/LITERATURE_REVIEWS.md`).
-
 ## Setup
 
 ```powershell
@@ -126,5 +124,3 @@ python scripts/test_main.py --planner-mode neural --model-variant structured --n
 4. Report plots  
 5. Strike & Score  
 5+. Dual-model variants + 3-way planner comparison  
-
-Details: local `data/phase_archives/` (gitignored)
